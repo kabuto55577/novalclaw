@@ -15,6 +15,160 @@ import omninovalLogo from "../../assets/omninoval-logo.png";
 const USER_ID = "desktop-user";
 const SEND_TIMEOUT_MS = 90_000;
 
+/** 单个文本附件最大字节（UTF-8），防止拖入巨型日志拖垮前端 */
+const DROP_TEXT_FILE_MAX_BYTES = 512 * 1024;
+/** 嵌入为 Markdown 图片的最大字节（base64 后更大，勿调高过多） */
+const DROP_IMAGE_INLINE_MAX_BYTES = 256 * 1024;
+/** 与隐藏 file input 关联，用于 label 触发（避免 Tauri/WebKit 拦截程序化 click） */
+const CHAT_ATTACHMENT_INPUT_ID = "chat-composer-file-input";
+/** 单次拖放最多处理的文件数 */
+const DROP_FILES_MAX_COUNT = 16;
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "markdown",
+  "mdx",
+  "json",
+  "jsonl",
+  "jsonc",
+  "csv",
+  "tsv",
+  "log",
+  "yaml",
+  "yml",
+  "xml",
+  "html",
+  "htm",
+  "swift",
+  "rs",
+  "py",
+  "rb",
+  "go",
+  "java",
+  "kt",
+  "kts",
+  "c",
+  "cc",
+  "cpp",
+  "h",
+  "hpp",
+  "cs",
+  "php",
+  "vue",
+  "svelte",
+  "js",
+  "mjs",
+  "cjs",
+  "ts",
+  "tsx",
+  "jsx",
+  "css",
+  "scss",
+  "less",
+  "sass",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "sql",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+  "gradle",
+  "plist",
+  "rst",
+  "tex",
+  "bib",
+]);
+
+function fileExtensionLower(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+function isProbablyTextFile(file: File): boolean {
+  const ext = fileExtensionLower(file.name);
+  if (TEXT_FILE_EXTENSIONS.has(ext)) return true;
+  if (file.type.startsWith("text/")) return true;
+  if (
+    file.type === "application/json" ||
+    file.type === "application/xml" ||
+    file.type.includes("javascript") ||
+    file.type === "application/x-sh"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function escapeMarkdownImageAlt(text: string): string {
+  return text.replace(/[[\]]/g, "");
+}
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** 将拖放/选择的文件转为可粘贴进输入框的文本（Markdown） */
+async function formatDroppedFilesContent(files: FileList | readonly File[]): Promise<string> {
+  const list = Array.from(files).slice(0, DROP_FILES_MAX_COUNT);
+  const parts: string[] = [];
+
+  for (const file of list) {
+    const displayName = file.name?.trim() || "unnamed";
+
+    if (file.size === 0) {
+      parts.push(`\n\n[空文件: ${displayName}]`);
+      continue;
+    }
+
+    if (file.type.startsWith("image/")) {
+      if (file.size > DROP_IMAGE_INLINE_MAX_BYTES) {
+        parts.push(
+          `\n\n[图片: ${displayName} · ${Math.round(file.size / 1024)} KB — 超过 ${Math.round(DROP_IMAGE_INLINE_MAX_BYTES / 1024)} KB 上限未嵌入；请缩小后再拖入或改用文字描述。]`
+        );
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataURL(file);
+        parts.push(`\n\n![${escapeMarkdownImageAlt(displayName)}](${dataUrl})`);
+      } catch {
+        parts.push(`\n\n[图片读取失败: ${displayName}]`);
+      }
+      continue;
+    }
+
+    if (isProbablyTextFile(file)) {
+      if (file.size > DROP_TEXT_FILE_MAX_BYTES) {
+        parts.push(
+          `\n\n[文本附件 ${displayName}: 过大 (${Math.round(file.size / 1024)} KB)，上限 ${Math.round(DROP_TEXT_FILE_MAX_BYTES / 1024)} KB — 请拆分或使用更小文件。]`
+        );
+        continue;
+      }
+      try {
+        const text = await file.text();
+        parts.push(`\n\n--- 附件: ${displayName} ---\n${text}\n--- 附件结束 ---`);
+      } catch {
+        parts.push(`\n\n[文本读取失败: ${displayName}]`);
+      }
+      continue;
+    }
+
+    parts.push(
+      `\n\n[附件: ${displayName} · ${file.type || "未知类型"} · ${Math.round(file.size / 1024)} KB — 未能自动读取此类文件内容；可先导出为文本再拖入。]`
+    );
+  }
+
+  return parts.join("");
+}
+
 interface ChatMessage {
   role: "user" | "assistant" | "error";
   content: string;
@@ -111,6 +265,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const listEndRef = useRef<HTMLDivElement>(null);
   const cancelledRef = useRef(false);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [composerDragActive, setComposerDragActive] = useState(false);
 
   const activeSession = avatars.find((a) => a.id === activeAvatarId);
   const sessionId = activeSession?.sessionId ?? "omninova-chat-session";
@@ -314,6 +469,66 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const appendVoiceTranscript = useCallback((text: string) => {
     setInput((prev) => (prev.trim() ? `${prev} ${text}` : text));
   }, []);
+
+  const mergeDroppedIntoInput = useCallback(async (files: FileList | readonly File[]) => {
+    const insert = await formatDroppedFilesContent(files);
+    const trimmed = insert.trim();
+    if (!trimmed) return;
+    setInput((prev) => (prev.trim() ? `${prev}\n${trimmed}` : trimmed));
+  }, []);
+
+  const handleComposerDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.dataTransfer.types.includes("Files")) return;
+    setComposerDragActive(true);
+  }, []);
+
+  const handleComposerDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget as Node | null;
+    if (next && e.currentTarget.contains(next)) return;
+    setComposerDragActive(false);
+  }, []);
+
+  /** 子区域（尤其是 textarea）必须 preventDefault，否则浏览器不会触发 drop */
+  const handleComposerDragOverFiles = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes("Files")) {
+      e.dataTransfer.dropEffect = "copy";
+    }
+  }, []);
+
+  const handleComposerDropFiles = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setComposerDragActive(false);
+      if (sending) return;
+      const files = e.dataTransfer.files;
+      if (!files?.length) return;
+      try {
+        await mergeDroppedIntoInput(files);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [mergeDroppedIntoInput, sending]
+  );
+
+  const handleAttachFilesChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      e.target.value = "";
+      if (!files?.length) return;
+      try {
+        await mergeDroppedIntoInput(files);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [mergeDroppedIntoInput]
+  );
 
   const statusText =
     gatewayStatus === "connected"
@@ -556,24 +771,49 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
               appendTranscript={appendVoiceTranscript}
               disabled={sending || gatewayStatus !== "connected"}
             />
-            <div className="chat-input-row">
-              <button
-                type="button"
-                className="chat-attach-btn"
-                title="附件（即将支持）"
-                disabled
-              >
-                <span aria-hidden>📎</span>
-              </button>
+
+            <input
+              id={CHAT_ATTACHMENT_INPUT_ID}
+              type="file"
+              multiple
+              disabled={sending}
+              className="chat-file-input-hidden"
+              aria-label="选择附件文件"
+              onChange={handleAttachFilesChange}
+            />
+
+            <div
+              className={`chat-input-row${composerDragActive ? " chat-input-row--drag-over" : ""}`}
+              onDragEnter={handleComposerDragEnter}
+              onDragLeave={handleComposerDragLeave}
+              onDragOver={handleComposerDragOverFiles}
+              onDrop={handleComposerDropFiles}
+              aria-label="消息输入区域：可将文件拖入白色输入栏或点击下方曲别针添加附件"
+            >
+              {sending ? (
+                <span className="chat-attach-btn chat-attach-btn--disabled" title="发送中暂不可添加附件">
+                  <span aria-hidden>📎</span>
+                </span>
+              ) : (
+                <label
+                  htmlFor={CHAT_ATTACHMENT_INPUT_ID}
+                  className="chat-attach-btn"
+                  title="添加附件（点击选择文件；亦可拖入输入框）"
+                >
+                  <span aria-hidden>📎</span>
+                </label>
+              )}
               <textarea
                 className="chat-input"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onDragOver={handleComposerDragOverFiles}
+                onDrop={handleComposerDropFiles}
                 placeholder={
                   gatewayStatus === "connected"
-                    ? "输入消息，Enter 发送…"
-                    : "网关未连接…"
+                    ? "输入消息，Enter 发送…（支持拖入文件）"
+                    : "网关未连接…（仍可拖入文件编辑草稿）"
                 }
                 rows={1}
                 disabled={sending || gatewayStatus !== "connected"}

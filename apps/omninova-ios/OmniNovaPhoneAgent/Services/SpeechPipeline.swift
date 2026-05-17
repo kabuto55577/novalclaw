@@ -14,7 +14,7 @@ final class SpeechPipeline: NSObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private let speechRecognizer: SFSpeechRecognizer?
 
-    override init() {
+    nonisolated override init() {
         self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
         super.init()
     }
@@ -35,9 +35,11 @@ final class SpeechPipeline: NSObject {
     }
 
     /// 开始从麦克风采集并实时转写；结果通过 `onPartial` / `onFinal` 回调。
+    /// 回调被标注为 `@MainActor`，以便调用方可以直接在闭包内同步访问
+    /// `@MainActor` 隔离的对象（如 `ConversationLogStore`）。
     func startListening(
-        onPartial: @escaping (String) -> Void,
-        onFinal: @escaping (String) -> Void
+        onPartial: @escaping @MainActor (String) -> Void,
+        onFinal: @escaping @MainActor (String) -> Void
     ) throws {
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
             throw NSError(domain: "SpeechPipeline", code: 1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable"])
@@ -70,9 +72,9 @@ final class SpeechPipeline: NSObject {
                     self.lastTranscript = text
                 }
                 if result.isFinal {
-                    onFinal(text)
+                    Task { @MainActor in onFinal(text) }
                 } else {
-                    onPartial(text)
+                    Task { @MainActor in onPartial(text) }
                 }
             }
             if error != nil {

@@ -16,6 +16,8 @@ final class AgentGatewayClient {
     }()
     private let decoder = JSONDecoder()
 
+    nonisolated init() {}
+
     private var deviceName: String {
         #if canImport(UIKit)
         return UIDevice.current.name

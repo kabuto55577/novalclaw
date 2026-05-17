@@ -8,10 +8,10 @@ final class AgentResponseSynthesizer: NSObject {
     private let synth = AVSpeechSynthesizer()
     private var voiceIdentifier: String?
 
-    override init() {
+    nonisolated override init() {
         super.init()
         synth.delegate = self
-        selectBestVoice()
+        self.voiceIdentifier = Self.bestZhVoiceIdentifier()
     }
 
     func speak(_ text: String) {
@@ -35,11 +35,11 @@ final class AgentResponseSynthesizer: NSObject {
         isSpeaking = false
     }
 
-    private func selectBestVoice() {
-        let preferred = AVSpeechSynthesisVoice.speechVoices()
+    nonisolated private static func bestZhVoiceIdentifier() -> String? {
+        AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix("zh") }
             .sorted { ($0.quality.rawValue, $0.name) > ($1.quality.rawValue, $1.name) }
-        voiceIdentifier = preferred.first?.identifier
+            .first?.identifier
     }
 
     private func configureAudioSession() {

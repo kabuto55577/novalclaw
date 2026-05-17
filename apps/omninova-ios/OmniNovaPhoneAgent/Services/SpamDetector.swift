@@ -66,7 +66,7 @@ final class SpamDetector {
 
     private var recentCalls: [String: [Date]] = [:]
 
-    init(bundledJSON: Data? = nil) {
+    nonisolated init(bundledJSON: Data? = nil) {
         if let bundledJSON, let rf = try? JSONDecoder().decode(RulesFile.self, from: bundledJSON) {
             self.rulesFile = rf
         } else if let data = Self.loadBundledDefault() {
@@ -158,7 +158,7 @@ final class SpamDetector {
         return h * 60 + m
     }
 
-    private static func loadBundledDefault() -> Data? {
+    nonisolated private static func loadBundledDefault() -> Data? {
         guard let url = Bundle.main.url(forResource: "spam_detection_rules", withExtension: "json") else {
             return nil
         }

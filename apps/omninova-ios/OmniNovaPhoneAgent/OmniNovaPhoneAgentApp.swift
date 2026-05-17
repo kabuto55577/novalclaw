@@ -1,6 +1,7 @@
 import SwiftUI
 
 @main
+@MainActor
 struct OmniNovaPhoneAgentApp: App {
     @State private var callManager = CallManager()
     @State private var speechPipeline = SpeechPipeline()
@@ -51,7 +52,7 @@ struct OmniNovaPhoneAgentApp: App {
                         sessionId: sessionId, role: "caller",
                         text: transcript, isFinal: true
                     )
-                    Task {
+                    Task { @MainActor in
                         await sendToAgentAndSpeak(sessionId: sessionId, callerText: transcript)
                     }
                 }
@@ -70,7 +71,7 @@ struct OmniNovaPhoneAgentApp: App {
             let extraction = extractor.extract(from: session)
             logStore.attachExtraction(sessionId: sessionId, extraction: extraction)
         }
-        Task {
+        Task { @MainActor in
             await gatewayClient.syncSession(logStore.session(for: sessionId))
             _ = await gatewayClient.extractKeyInfo(sessionId: sessionId)
         }

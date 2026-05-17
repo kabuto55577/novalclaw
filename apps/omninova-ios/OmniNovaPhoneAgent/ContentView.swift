@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct ContentView: View {
     @Environment(CallManager.self) private var callManager
     @Environment(SpeechPipeline.self) private var speech
@@ -148,7 +149,7 @@ struct ContentView: View {
                 },
                 onFinal: { transcript in
                     logStore.appendTurn(sessionId: sessionId, role: "caller", text: transcript, isFinal: true)
-                    Task {
+                    Task { @MainActor in
                         guard let reply = await gateway.chat(text: transcript, sessionId: sessionId) else { return }
                         logStore.appendTurn(sessionId: sessionId, role: "agent", text: reply, isFinal: true)
                         synthesizer.speak(reply)

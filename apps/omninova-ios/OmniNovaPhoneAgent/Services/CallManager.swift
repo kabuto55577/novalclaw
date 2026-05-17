@@ -16,12 +16,11 @@ final class CallManager: NSObject {
 
     private let provider: CXProvider
     private let callController = CXCallController()
-    private var onCallAnswered: ((UUID) -> Void)?
-    private var onCallEnded: ((UUID) -> Void)?
+    private var onCallAnswered: (@MainActor (UUID) -> Void)?
+    private var onCallEnded: (@MainActor (UUID) -> Void)?
 
-    override init() {
-        let config = CXProviderConfiguration()
-        config.localizedName = "OmniNova"
+    nonisolated override init() {
+        let config = CXProviderConfiguration(localizedName: "OmniNova")
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.supportedHandleTypes = [.generic, .phoneNumber]
@@ -31,8 +30,8 @@ final class CallManager: NSObject {
     }
 
     func configure(
-        onCallAnswered: @escaping (UUID) -> Void,
-        onCallEnded: @escaping (UUID) -> Void
+        onCallAnswered: @escaping @MainActor (UUID) -> Void,
+        onCallEnded: @escaping @MainActor (UUID) -> Void
     ) {
         self.onCallAnswered = onCallAnswered
         self.onCallEnded = onCallEnded

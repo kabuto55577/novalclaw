@@ -3,8 +3,12 @@ import Foundation
 /// 管理对话会话的内存缓存与 JSON 文件持久化。
 /// 文件写入 `Documents/conversations/<sessionId>.json`，格式与
 /// `skills/phone-call-assistant/conversation_log_schema.json` 对齐。
-@MainActor @Observable
-final class ConversationLogStore {
+///
+/// 仅以 `@Observable` 暴露给 SwiftUI；调用方（View 处理器、`Task @MainActor`）
+/// 负责保证写操作发生在主线程上。类级别不使用 `@MainActor`，使
+/// `@State` 默认值可以在合成 init 中直接构造它。
+@Observable
+final class ConversationLogStore: @unchecked Sendable {
     private(set) var sessions: [ConversationSessionFile] = []
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -12,25 +16,8 @@ final class ConversationLogStore {
         return e
     }()
 
-    nonisolated init() {
-        // Load persisted sessions inline so we can keep the initializer
-        // `nonisolated` (required for `@State` default-value expressions in
-        // SwiftUI under Swift 5.9, where struct-level `@MainActor` does not
-        // propagate to stored-property initializers).
-        let dir = Self.conversationsDir()
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
-        ) else { return }
-        let decoder = JSONDecoder()
-        var loaded: [ConversationSessionFile] = []
-        for url in files where url.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: url),
-                  let session = try? decoder.decode(ConversationSessionFile.self, from: data)
-            else { continue }
-            loaded.append(session)
-        }
-        loaded.sort { $0.startedAtUtc < $1.startedAtUtc }
-        self.sessions = loaded
+    init() {
+        loadFromDisk()
     }
 
     func startSession(sessionId: String, channel: ConversationChannel) {
@@ -108,12 +95,27 @@ final class ConversationLogStore {
         }
     }
 
-    nonisolated private static func conversationsDir() -> URL {
+    private func loadFromDisk() {
+        let dir = Self.conversationsDir()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        ) else { return }
+        let decoder = JSONDecoder()
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let session = try? decoder.decode(ConversationSessionFile.self, from: data)
+            else { continue }
+            sessions.append(session)
+        }
+        sessions.sort { $0.startedAtUtc < $1.startedAtUtc }
+    }
+
+    private static func conversationsDir() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("conversations", isDirectory: true)
     }
 
-    nonisolated private static func iso8601Now() -> String {
+    private static func iso8601Now() -> String {
         ISO8601DateFormatter().string(from: Date())
     }
 }

@@ -2,16 +2,20 @@ import AVFoundation
 import Foundation
 
 /// 将 Agent 回复文本通过系统 TTS 播放给来电者。
-@MainActor @Observable
-final class AgentResponseSynthesizer: NSObject {
+///
+/// 仅以 `@Observable` 暴露给 SwiftUI；类级别不使用 `@MainActor`，
+/// 因为 `AVSpeechSynthesizer` 代理回调由系统在后台线程派发，
+/// 我们再用 `Task @MainActor` 跃迁到主线程更新 `isSpeaking`。
+@Observable
+final class AgentResponseSynthesizer: NSObject, @unchecked Sendable {
     private(set) var isSpeaking = false
     private let synth = AVSpeechSynthesizer()
     private var voiceIdentifier: String?
 
-    nonisolated override init() {
+    override init() {
         super.init()
         synth.delegate = self
-        self.voiceIdentifier = Self.bestZhVoiceIdentifier()
+        selectBestVoice()
     }
 
     func speak(_ text: String) {
@@ -35,11 +39,11 @@ final class AgentResponseSynthesizer: NSObject {
         isSpeaking = false
     }
 
-    nonisolated private static func bestZhVoiceIdentifier() -> String? {
-        AVSpeechSynthesisVoice.speechVoices()
+    private func selectBestVoice() {
+        let preferred = AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix("zh") }
             .sorted { ($0.quality.rawValue, $0.name) > ($1.quality.rawValue, $1.name) }
-            .first?.identifier
+        voiceIdentifier = preferred.first?.identifier
     }
 
     private func configureAudioSession() {

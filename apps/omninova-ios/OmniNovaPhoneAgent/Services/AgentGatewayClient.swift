@@ -4,8 +4,11 @@ import UIKit
 #endif
 
 /// 与 OmniNova 网关（HTTP API）通信：发送对话文本、接收 Agent 回复、同步会话记录。
-@MainActor @Observable
-final class AgentGatewayClient {
+///
+/// 仅以 `@Observable` 暴露给 SwiftUI；HTTP 调用本就跨线程，类级别不再标
+/// `@MainActor`，让 `@State` 默认值能够在合成 init 中直接构造。
+@Observable
+final class AgentGatewayClient: @unchecked Sendable {
     private(set) var isConnected = false
     private var baseURL = "http://127.0.0.1:10809"
     private let session = URLSession.shared
@@ -16,7 +19,7 @@ final class AgentGatewayClient {
     }()
     private let decoder = JSONDecoder()
 
-    nonisolated init() {}
+    init() {}
 
     private var deviceName: String {
         #if canImport(UIKit)

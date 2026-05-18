@@ -7,8 +7,13 @@ import Foundation
 /// - `reportIncomingCall` 向系统报告 VoIP 来电（需 PushKit + VoIP 证书触发，此处提供 API）。
 /// - 系统展示原生来电 UI 后，`CXAnswerCallAction` 自动执行接听（若 `autoAnswer` 开启）。
 /// - **蜂窝电话无法用 CallKit 自动接听**——仅限 VoIP 来电。
-@MainActor @Observable
-final class CallManager: NSObject {
+///
+/// 类本身仅以 `@Observable` 提供 SwiftUI 观察能力，不再标记 `@MainActor`：
+/// 这样 `@State` 默认值能在合成的 memberwise init 中直接构造它，同时
+/// CallKit 自后台线程派发的代理回调也能就地处理，必要时再 `Task @MainActor`
+/// 跃迁到主线程更新可观察状态。
+@Observable
+final class CallManager: NSObject, @unchecked Sendable {
     private(set) var hasActiveCall = false
     private(set) var activeCallUUID: UUID?
 
@@ -19,7 +24,7 @@ final class CallManager: NSObject {
     private var onCallAnswered: (@MainActor (UUID) -> Void)?
     private var onCallEnded: (@MainActor (UUID) -> Void)?
 
-    nonisolated override init() {
+    override init() {
         let config = CXProviderConfiguration(localizedName: "OmniNova")
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
@@ -29,6 +34,8 @@ final class CallManager: NSObject {
         provider.setDelegate(self, queue: nil)
     }
 
+    /// 回调被标注为 `@MainActor`，便于调用方（`@MainActor` 隔离的 SwiftUI
+    /// App/View）直接在闭包内同步访问主线程隔离的成员函数。
     func configure(
         onCallAnswered: @escaping @MainActor (UUID) -> Void,
         onCallEnded: @escaping @MainActor (UUID) -> Void

@@ -3,8 +3,11 @@ import Foundation
 /// 骚扰电话识别器，规则来源于 `skills/phone-call-assistant/spam_detection_rules.json`。
 ///
 /// 可在 App 启动时预置内置规则，并从网关通过 `AgentGatewayClient.fetchSpamRules()` 动态覆盖。
-@MainActor @Observable
-final class SpamDetector {
+///
+/// 仅以 `@Observable` 暴露给 SwiftUI；类级别不使用 `@MainActor`，
+/// 让 `@State` 默认值能够在合成 init 中直接构造。
+@Observable
+final class SpamDetector: @unchecked Sendable {
     enum Severity: String, Codable {
         case block, silence, allow
     }
@@ -66,7 +69,7 @@ final class SpamDetector {
 
     private var recentCalls: [String: [Date]] = [:]
 
-    nonisolated init(bundledJSON: Data? = nil) {
+    init(bundledJSON: Data? = nil) {
         if let bundledJSON, let rf = try? JSONDecoder().decode(RulesFile.self, from: bundledJSON) {
             self.rulesFile = rf
         } else if let data = Self.loadBundledDefault() {
@@ -158,7 +161,7 @@ final class SpamDetector {
         return h * 60 + m
     }
 
-    nonisolated private static func loadBundledDefault() -> Data? {
+    private static func loadBundledDefault() -> Data? {
         guard let url = Bundle.main.url(forResource: "spam_detection_rules", withExtension: "json") else {
             return nil
         }

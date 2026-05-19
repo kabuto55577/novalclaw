@@ -66,9 +66,16 @@ omninova-claw_<version>_<platform>_<original-bundle-name>.<ext>
 
 ## Signing Secrets Template
 
+- **中文完整指南：** [`../../docs/SIGNING_CN.md`](../../docs/SIGNING_CN.md)
 - Reference: `../../.github/omninova-tauri-secrets.example.md`
 - Use that file as the checklist for Android/iOS/macOS signing variables and GitHub Actions secrets.
-- The GitHub workflow enables signing/notarization steps automatically when the corresponding secrets are configured.
+- The GitHub workflow runs `scripts/setup-apple-signing.sh` on macOS, then Tauri signs + notarizes when secrets are configured.
+
+```bash
+# Local signed macOS build (after exporting APPLE_* env vars or .p12)
+npm run build:macos:signed:apple
+npm run verify:macos -- path/to/OmniNova\ Claw.app
+```
 
 ## Notes
 

@@ -25,7 +25,11 @@ final class CallManager: NSObject, @unchecked Sendable {
     private var onCallEnded: (@MainActor (UUID) -> Void)?
 
     override init() {
-        let config = CXProviderConfiguration(localizedName: "OmniNova")
+        // In iOS 14+ `init(localizedName:)` is deprecated and `localizedName`
+        // is read-only; CXProviderConfiguration reads the user-visible name
+        // from the bundle's `CFBundleDisplayName` (set in Info.plist to
+        // "OmniNova 通话助手") automatically.
+        let config = CXProviderConfiguration()
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.supportedHandleTypes = [.generic, .phoneNumber]

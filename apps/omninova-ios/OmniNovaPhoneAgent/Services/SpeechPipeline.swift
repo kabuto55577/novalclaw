@@ -30,8 +30,17 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     func requestAuthorization() async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             SFSpeechRecognizer.requestAuthorization { [weak self] _ in
+                // Re-bind `self` to a non-optional strong reference *before*
+                // hopping to MainActor. Capturing the outer weak `self`
+                // (a `var`) directly inside a Task body is rejected under
+                // Swift 5.9 strict concurrency because the Task closure is
+                // concurrently-executing and may only capture `let`s.
+                guard let self else {
+                    Task { @MainActor in cont.resume() }
+                    return
+                }
                 Task { @MainActor in
-                    self?.refreshAuthorization()
+                    self.refreshAuthorization()
                     cont.resume()
                 }
             }

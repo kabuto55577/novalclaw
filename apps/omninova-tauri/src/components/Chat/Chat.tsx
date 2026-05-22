@@ -1,11 +1,18 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { ChatMediaInteraction } from "./ChatMediaInteraction";
 import { invokeTauri } from "../../utils/tauri";
+import {
+  isTauriEnvironment,
+  pickComposerAttachmentPaths,
+  readComposerAttachmentsFromPaths,
+} from "../../utils/composerAttachments";
 import type {
+  Config,
   GatewayHealth,
   GatewayInboundResponse,
   GatewayStatus,
   ProviderHealthSummary,
+  ExecutionStep,
   RouteDecision,
 } from "../../types/config";
 
@@ -13,7 +20,13 @@ const GATEWAY_STATUS_POLL_MS = 8000;
 import omninovalLogo from "../../assets/omninoval-logo.png";
 
 const USER_ID = "desktop-user";
-const SEND_TIMEOUT_MS = 90_000;
+const DESKTOP_VISION_SESSION_KEY = "omninova-chat-desktop-vision";
+
+interface DesktopScreenshotPayload {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
 
 /** 单个文本附件最大字节（UTF-8），防止拖入巨型日志拖垮前端 */
 const DROP_TEXT_FILE_MAX_BYTES = 512 * 1024;
@@ -173,6 +186,7 @@ interface ChatMessage {
   role: "user" | "assistant" | "error";
   content: string;
   agent?: string;
+  steps?: ExecutionStep[];
 }
 
 interface AvatarSession {
@@ -221,24 +235,6 @@ function formatTime(date: Date) {
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () =>
-        reject(
-          new Error(
-            `请求超时（${Math.round(ms / 1000)}s），正在补充诊断信息，请稍候重试`
-          )
-        ),
-      ms
-    );
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
-    );
-  });
-}
-
 export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [avatars, setAvatars] = useState<AvatarSession[]>([
     { id: "main", name: "Main", sessionId: "omninova-chat-session", lastAt: formatTime(new Date()) },
@@ -262,10 +258,14 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [gatewayUrl, setGatewayUrl] = useState<string>("");
   const [availableModels] = useState<string[]>(["auto", "openai", "anthropic", "gemini", "ollama"]);
   const [selectedModel, setSelectedModel] = useState("auto");
+  const [activeSteps, setActiveSteps] = useState<ExecutionStep[]>([]);
   const listEndRef = useRef<HTMLDivElement>(null);
   const cancelledRef = useRef(false);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [composerDragActive, setComposerDragActive] = useState(false);
+  const [desktopVisionMaster, setDesktopVisionMaster] = useState(false);
+  const [desktopVisionOn, setDesktopVisionOn] = useState(false);
+  const [desktopVisionMaxPx, setDesktopVisionMaxPx] = useState(1280);
 
   const activeSession = avatars.find((a) => a.id === activeAvatarId);
   const sessionId = activeSession?.sessionId ?? "omninova-chat-session";
@@ -282,6 +282,21 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     void refreshGatewayStatus();
     const t = setInterval(refreshGatewayStatus, GATEWAY_STATUS_POLL_MS);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    void invokeTauri<Config>("get_setup_config")
+      .then((cfg) => {
+        const master = cfg.multimodal?.desktop_vision_enabled ?? false;
+        const maxPx = cfg.multimodal?.desktop_vision_max_dimension_px ?? 1280;
+        setDesktopVisionMaster(master);
+        setDesktopVisionMaxPx(maxPx);
+        const stored = localStorage.getItem(DESKTOP_VISION_SESSION_KEY);
+        if (stored === "1") setDesktopVisionOn(true);
+        else if (stored === "0") setDesktopVisionOn(false);
+        else setDesktopVisionOn(master);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -359,6 +374,15 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     cancelledRef.current = true;
   }, []);
 
+  const updateStep = useCallback((title: string, status: ExecutionStep["status"], detail?: string) => {
+    setActiveSteps((prev) => {
+      const existingIndex = prev.findIndex((step) => step.title === title);
+      const nextStep: ExecutionStep = { title, status, detail };
+      if (existingIndex < 0) return [...prev, nextStep];
+      return prev.map((step, index) => (index === existingIndex ? nextStep : step));
+    });
+  }, []);
+
   const handleSend = async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -372,6 +396,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     setError(null);
     cancelledRef.current = false;
     setElapsedSec(0);
+    setActiveSteps([
+      { title: "准备请求", status: "done", detail: `会话：${sessionId}` },
+      { title: "路由选择", status: "running", detail: "正在选择 Agent / Provider / Model" },
+    ]);
 
     setMessagesBySession((prev) => ({
       ...prev,
@@ -390,22 +418,64 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
 
     let route: RouteDecision | null = null;
     try {
+      const metadata: Record<string, unknown> = {
+        preferred_provider: selectedModel === "auto" ? undefined : selectedModel,
+      };
+
+      if (desktopVisionOn && desktopVisionMaster && isTauriEnvironment()) {
+        updateStep("桌面视觉", "running", "正在截取主屏幕…");
+        try {
+          const shot = await invokeTauri<DesktopScreenshotPayload>("capture_desktop_screenshot", {
+            maxDimensionPx: desktopVisionMaxPx,
+          });
+          metadata.desktop_vision = true;
+          metadata.desktop_vision_images = [shot.dataUrl];
+          updateStep(
+            "桌面视觉",
+            "done",
+            `已截取 ${shot.width}×${shot.height}，将随消息发送给视觉模型`
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          updateStep("桌面视觉", "error", msg);
+          setError(`桌面截图失败：${msg}`);
+          setSending(false);
+          if (elapsedTimerRef.current) {
+            clearInterval(elapsedTimerRef.current);
+            elapsedTimerRef.current = null;
+          }
+          setMessagesBySession((prev) => ({
+            ...prev,
+            [activeAvatarId]: (prev[activeAvatarId] ?? []).slice(0, -1),
+          }));
+          setInput(text);
+          return;
+        }
+      }
+
       const payload = {
         channel: "web" as const,
         text,
         sessionId,
         userId: USER_ID,
-        metadata: { preferred_provider: selectedModel === "auto" ? undefined : selectedModel },
+        metadata,
       };
       route = await invokeTauri<RouteDecision>("route_inbound_message", {
         payload,
       }).catch(() => null);
-      const result = await withTimeout(
-        invokeTauri<GatewayInboundResponse>("process_inbound_message", {
-          payload,
-        }),
-        SEND_TIMEOUT_MS
-      );
+      if (route) {
+        updateStep(
+          "路由选择",
+          "done",
+          `Agent: ${route.agent_name}${route.provider ? ` · Provider: ${route.provider}` : ""}${route.model ? ` · Model: ${route.model}` : ""}`
+        );
+      } else {
+        updateStep("路由选择", "done", "路由预览不可用，交由网关处理");
+      }
+      updateStep("Agent 执行", "running", "正在调用模型和工具；界面不设置超时，会持续等待后端完成");
+      const result = await invokeTauri<GatewayInboundResponse>("process_inbound_message", {
+        payload,
+      });
 
       if (cancelledRef.current) {
         setMessagesBySession((prev) => ({
@@ -417,6 +487,8 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       }
 
       const replyText = result?.reply || "(空回复)";
+      const steps = result?.steps?.length ? result.steps : activeSteps;
+      setActiveSteps(steps);
       setMessagesBySession((prev) => ({
         ...prev,
         [activeAvatarId]: [
@@ -425,6 +497,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
             role: "assistant",
             content: replyText,
             agent: result?.route?.agent_name,
+            steps,
           },
         ],
       }));
@@ -452,6 +525,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     } finally {
       setSending(false);
       setElapsedSec(0);
+      setActiveSteps([]);
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
@@ -470,12 +544,79 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     setInput((prev) => (prev.trim() ? `${prev} ${text}` : text));
   }, []);
 
-  const mergeDroppedIntoInput = useCallback(async (files: FileList | readonly File[]) => {
-    const insert = await formatDroppedFilesContent(files);
+  const appendAttachmentContent = useCallback((insert: string) => {
     const trimmed = insert.trim();
     if (!trimmed) return;
     setInput((prev) => (prev.trim() ? `${prev}\n${trimmed}` : trimmed));
   }, []);
+
+  const mergePathsIntoInput = useCallback(
+    async (paths: string[]) => {
+      const insert = await readComposerAttachmentsFromPaths(paths);
+      appendAttachmentContent(insert);
+    },
+    [appendAttachmentContent]
+  );
+
+  /** 浏览器预览等非 Tauri 环境：用 File API 读取 */
+  const mergeDroppedIntoInput = useCallback(
+    async (files: FileList | readonly File[]) => {
+      const insert = await formatDroppedFilesContent(files);
+      appendAttachmentContent(insert);
+    },
+    [appendAttachmentContent]
+  );
+
+  /** Tauri 桌面：WKWebView 会拦截 HTML5 拖放，需用原生 onDragDropEvent 拿路径 */
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      const webview = getCurrentWebview();
+      unlisten = await webview.onDragDropEvent(async (event) => {
+        if (disposed) return;
+        const { payload } = event;
+        if (payload.type === "enter" || payload.type === "over") {
+          setComposerDragActive(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setComposerDragActive(false);
+          return;
+        }
+        if (payload.type !== "drop") return;
+
+        setComposerDragActive(false);
+        if (sending) return;
+        if (!payload.paths?.length) return;
+
+        try {
+          await mergePathsIntoInput(payload.paths);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [mergePathsIntoInput, sending]);
+
+  const handleAttachTauri = useCallback(async () => {
+    try {
+      const paths = await pickComposerAttachmentPaths();
+      if (!paths.length) return;
+      await mergePathsIntoInput(paths);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [mergePathsIntoInput]);
 
   const handleComposerDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -504,6 +645,8 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       e.preventDefault();
       e.stopPropagation();
       setComposerDragActive(false);
+      // Tauri 下 dataTransfer.files 常为空，由 onDragDropEvent 处理
+      if (isTauriEnvironment()) return;
       if (sending) return;
       const files = e.dataTransfer.files;
       if (!files?.length) return;
@@ -739,15 +882,19 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                   {msg.agent && (
                     <div className="chat-bubble-meta">Agent: {msg.agent}</div>
                   )}
+                  {msg.steps?.length ? <ExecutionSteps steps={msg.steps} /> : null}
                 </div>
               ))
             )}
             {sending && (
               <div className="chat-bubble chat-bubble-assistant chat-bubble-typing">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-elapsed">{elapsedSec}s</span>
+                <div className="chat-typing-row">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-elapsed">{elapsedSec}s</span>
+                </div>
+                {activeSteps.length ? <ExecutionSteps steps={activeSteps} /> : null}
               </div>
             )}
             <div ref={listEndRef} />
@@ -794,6 +941,15 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                 <span className="chat-attach-btn chat-attach-btn--disabled" title="发送中暂不可添加附件">
                   <span aria-hidden>📎</span>
                 </span>
+              ) : isTauriEnvironment() ? (
+                <button
+                  type="button"
+                  className="chat-attach-btn"
+                  title="添加附件（系统文件对话框；亦可拖入输入框）"
+                  onClick={() => void handleAttachTauri()}
+                >
+                  <span aria-hidden>📎</span>
+                </button>
               ) : (
                 <label
                   htmlFor={CHAT_ATTACHMENT_INPUT_ID}
@@ -851,6 +1007,29 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                   </option>
                 ))}
               </select>
+              <label
+                className={`chat-vision-toggle${desktopVisionMaster ? "" : " chat-vision-toggle--disabled"}`}
+                title={
+                  desktopVisionMaster
+                    ? "发送时截取主屏幕并传给支持视觉的多模态模型"
+                    : "请先在 设置 → 通用 中开启「桌面视觉监控」"
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={desktopVisionOn && desktopVisionMaster}
+                  disabled={!desktopVisionMaster || sending || gatewayStatus !== "connected"}
+                  onChange={() => {
+                    if (!desktopVisionMaster) return;
+                    setDesktopVisionOn((prev) => {
+                      const next = !prev;
+                      localStorage.setItem(DESKTOP_VISION_SESSION_KEY, next ? "1" : "0");
+                      return next;
+                    });
+                  }}
+                />
+                <span>桌面视觉</span>
+              </label>
             </div>
             <div className="chat-gateway-footer">
               <span
@@ -865,6 +1044,38 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
           </div>
         </main>
       </div>
+    </div>
+  );
+}
+
+function ExecutionSteps({ steps }: { steps: ExecutionStep[] }) {
+  const statusLabel = (status?: ExecutionStep["status"]) => {
+    switch (status) {
+      case "running":
+        return "进行中";
+      case "done":
+        return "完成";
+      case "error":
+        return "失败";
+      case "pending":
+        return "等待";
+      default:
+        return "记录";
+    }
+  };
+
+  return (
+    <div className="chat-execution-steps">
+      <div className="chat-execution-title">执行步骤</div>
+      <ol>
+        {steps.map((step, index) => (
+          <li key={`${step.title}-${index}`} className={`chat-execution-step chat-execution-step--${step.status ?? "info"}`}>
+            <span className="chat-execution-step-title">{step.title}</span>
+            <span className="chat-execution-step-status">{statusLabel(step.status)}</span>
+            {step.detail ? <div className="chat-execution-step-detail">{step.detail}</div> : null}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -910,7 +1121,7 @@ async function buildSendErrorMessage(
       return `${rawMessage}。当前路由命中的 Provider 未启用${providerHint}${agentHint}，请先在配置页启用并保存。`;
     }
 
-    return `${rawMessage}。网关健康检查正常${providerHint}${agentHint}，更可能是模型推理耗时过长而不是网关断连。可以稍后重试，或检查上游模型服务响应速度。`;
+    return `${rawMessage}。网关健康检查正常${providerHint}${agentHint}，更可能是模型推理耗时过长而不是网关断连。界面不会主动超时；如长期无响应，请检查上游模型服务状态。`;
   } catch {
     return `${rawMessage}。另外，超时后未能取得健康检查结果，请确认网关仍在运行，并检查上游模型服务是否可达。`;
   }

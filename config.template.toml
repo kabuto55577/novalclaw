@@ -391,6 +391,8 @@
 # [multimodal]
 # vision_enabled = false
 # audio_enabled = false
+# desktop_vision_enabled = false
+# desktop_vision_max_dimension_px = 1280
 
 # --- Transcription ---
 # [transcription]

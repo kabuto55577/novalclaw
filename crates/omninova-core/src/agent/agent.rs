@@ -35,6 +35,14 @@ impl Agent {
     }
 
     pub async fn process_message(&mut self, message: &str) -> Result<String> {
+        self.process_message_with_images(message, &[]).await
+    }
+
+    pub async fn process_message_with_images(
+        &mut self,
+        message: &str,
+        images: &[String],
+    ) -> Result<String> {
         if self.messages.is_empty() {
             self.messages.extend(bootstrap_system_messages(&self.config));
         }
@@ -49,7 +57,12 @@ impl Agent {
             )
             .await;
 
-        self.messages.push(ChatMessage::user(message));
+        if images.is_empty() {
+            self.messages.push(ChatMessage::user(message));
+        } else {
+            self.messages
+                .push(ChatMessage::user_with_images(message, images.to_vec()));
+        }
         let dispatcher = AgentDispatcher::new(
             self.provider.as_ref(),
             &self.tools,

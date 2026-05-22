@@ -245,6 +245,11 @@ export interface AgentPersonaConfig {
   mbti_type?: string;
 }
 
+export interface MultimodalConfig {
+  desktop_vision_enabled?: boolean;
+  desktop_vision_max_dimension_px?: number;
+}
+
 // Main configuration interface
 export interface Config {
   api_key?: string;
@@ -261,6 +266,7 @@ export interface Config {
   channels: ChannelsConfig;
   skills?: SkillsConfig;
   agent?: AgentPersonaConfig;
+  multimodal?: MultimodalConfig;
 }
 
 export interface GatewayStatus {
@@ -309,6 +315,13 @@ export interface RouteDecision {
 export interface GatewayInboundResponse {
   route: RouteDecision;
   reply: string;
+  steps?: ExecutionStep[];
+}
+
+export interface ExecutionStep {
+  title: string;
+  status?: "pending" | "running" | "done" | "error";
+  detail?: string | null;
 }
 
 export interface GatewayHealth {

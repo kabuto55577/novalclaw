@@ -143,11 +143,24 @@ impl GatewayRuntime {
 
     pub async fn process_inbound(&self, inbound: &InboundMessage) -> anyhow::Result<GatewayInboundResponse> {
         self.ensure_not_stopped().await?;
+        let mut steps = vec![ExecutionStep::done(
+            "接收请求",
+            format!("channel={:?}, session={}", inbound.channel, inbound.session_id.as_deref().unwrap_or("-")),
+        )];
         let cfg = self.config.read().await.clone();
         let _slot = acquire_inbound_slot(&cfg, &self.active_inbound)?;
         let _child_slot =
             acquire_subagent_guard(&cfg, inbound, &self.active_children_by_parent).await?;
         let route = resolve_agent_route(&cfg, inbound);
+        steps.push(ExecutionStep::done(
+            "路由选择",
+            format!(
+                "Agent: {}{}{}",
+                route.agent_name,
+                route.provider.as_ref().map(|p| format!(", Provider: {p}")).unwrap_or_default(),
+                route.model.as_ref().map(|m| format!(", Model: {m}")).unwrap_or_default()
+            ),
+        ));
         let lineage = self
             .validate_and_resolve_session_lineage(&cfg, inbound, &route.agent_name)
             .await?;
@@ -171,6 +184,10 @@ impl GatewayRuntime {
         };
         let provider = build_provider_with_selection(&cfg, &selection);
         let tools = create_tools_for_route(&cfg, &route.agent_name, self.memory.clone());
+        steps.push(ExecutionStep::done(
+            "准备工具",
+            format!("可用工具数：{}", tools.len()),
+        ));
 
         let mut agent_cfg = cfg.agent.clone();
         if let Some(delegate) = cfg.agents.get(&route.agent_name) {
@@ -189,6 +206,7 @@ impl GatewayRuntime {
                 if !prompt.is_empty() {
                     let current = agent_cfg.system_prompt.unwrap_or_default();
                     agent_cfg.system_prompt = Some(format!("{}\n{}", current, prompt));
+                    steps.push(ExecutionStep::done("加载技能提示", "已注入 workspace skills"));
                 }
             }
         }
@@ -197,29 +215,61 @@ impl GatewayRuntime {
         if let Some(session_id) = inbound.session_id.as_deref() {
             let _guard = self.session_store_guard.lock().await;
             match load_session_history(&cfg, &inbound.channel, session_id).await {
-                Ok(history) if !history.is_empty() => agent.import_messages(history),
-                Ok(_) => {}
-                Err(e) => warn!("failed to load session history for {}: {}", session_id, e),
+                Ok(history) if !history.is_empty() => {
+                    steps.push(ExecutionStep::done(
+                        "加载会话历史",
+                        format!("历史消息数：{}", history.len()),
+                    ));
+                    agent.import_messages(history)
+                }
+                Ok(_) => steps.push(ExecutionStep::done("加载会话历史", "无历史消息")),
+                Err(e) => {
+                    steps.push(ExecutionStep::error("加载会话历史", e.to_string()));
+                    warn!("failed to load session history for {}: {}", session_id, e)
+                }
             }
         }
 
-        let timeout_secs = resolve_agent_timeout_secs(&cfg, &route.agent_name);
-        let reply = match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            agent.process_message(&inbound.text),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("agent processing timed out after {timeout_secs}s"),
+        let raw_vision_images = collect_desktop_vision_images(&cfg, inbound);
+        let vision_images = if provider_supports_openai_vision(route.provider.as_deref()) {
+            raw_vision_images.clone()
+        } else {
+            Vec::new()
         };
+        if !raw_vision_images.is_empty() && vision_images.is_empty() {
+            steps.push(ExecutionStep::error(
+                "桌面视觉",
+                "当前 Provider 不支持图像输入，请改用 OpenAI 兼容的视觉模型（如 GPT-4o、DeepSeek-VL、豆包视觉等）",
+            ));
+        } else if !vision_images.is_empty() {
+            steps.push(ExecutionStep::done(
+                "桌面视觉",
+                format!("已附加 {} 张屏幕截图", vision_images.len()),
+            ));
+        }
+
+        steps.push(ExecutionStep::running("Agent 执行", "调用模型；如模型请求工具，将继续执行工具循环"));
+        let reply = if vision_images.is_empty() {
+            agent.process_message(&inbound.text).await?
+        } else {
+            agent
+                .process_message_with_images(&inbound.text, &vision_images)
+                .await?
+        };
+        steps.push(ExecutionStep::done("Agent 执行", "模型返回最终回复"));
+        steps.extend(extract_tool_steps(&agent.export_messages()));
         if let Some(session_id) = inbound.session_id.as_deref() {
             let _guard = self.session_store_guard.lock().await;
+            let history_messages = agent
+                .export_messages()
+                .into_iter()
+                .map(ChatMessage::strip_images_for_history)
+                .collect();
             if let Err(e) = save_session_history(
                 &cfg,
                 &inbound.channel,
                 session_id,
-                agent.export_messages(),
+                history_messages,
                 agent_cfg.max_history_messages,
                 lineage.parent_session_key.clone(),
                 lineage.parent_agent_id.clone(),
@@ -228,10 +278,13 @@ impl GatewayRuntime {
             )
             .await
             {
+                steps.push(ExecutionStep::error("保存会话历史", e.to_string()));
                 warn!("failed to save session history for {}: {}", session_id, e);
+            } else {
+                steps.push(ExecutionStep::done("保存会话历史", session_id.to_string()));
             }
         }
-        Ok(GatewayInboundResponse { route, reply })
+        Ok(GatewayInboundResponse { route, reply, steps })
     }
 
     async fn validate_and_resolve_session_lineage(
@@ -710,22 +763,6 @@ fn acquire_inbound_slot(
     }
 }
 
-fn resolve_agent_timeout_secs(cfg: &Config, route_agent_name: &str) -> u64 {
-    let subagent_timeout = if route_agent_name != cfg.agent.name {
-        cfg.agent_defaults_extended
-            .subagents
-            .as_ref()
-            .and_then(|s| s.run_timeout_seconds)
-    } else {
-        None
-    };
-
-    subagent_timeout
-        .or(cfg.agent_defaults_extended.timeout_seconds)
-        .unwrap_or(600)
-        .max(1) as u64
-}
-
 async fn acquire_subagent_guard(
     cfg: &Config,
     inbound: &InboundMessage,
@@ -777,6 +814,76 @@ async fn acquire_subagent_guard(
     }))
 }
 
+fn provider_supports_openai_vision(provider: Option<&str>) -> bool {
+    let Some(name) = provider.map(str::to_ascii_lowercase) else {
+        return true;
+    };
+    !matches!(name.as_str(), "anthropic" | "gemini" | "mock")
+}
+
+fn metadata_bool(inbound: &InboundMessage, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        inbound
+            .metadata
+            .get(*key)
+            .and_then(|value| {
+                value
+                    .as_bool()
+                    .or_else(|| value.as_str().map(|s| s == "true" || s == "1"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn metadata_string_array(inbound: &InboundMessage, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        let Some(value) = inbound.metadata.get(*key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            let urls = items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter(|url| !url.is_empty())
+                .collect::<Vec<_>>();
+            if !urls.is_empty() {
+                return urls;
+            }
+        }
+        if let Some(text) = value.as_str() {
+            if !text.is_empty() {
+                return vec![text.to_string()];
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn collect_desktop_vision_images(cfg: &Config, inbound: &InboundMessage) -> Vec<String> {
+    let requested = metadata_bool(
+        inbound,
+        &[
+            "desktop_vision",
+            "desktopVision",
+            "include_desktop_vision",
+            "includeDesktopVision",
+        ],
+    );
+    if !cfg.multimodal.desktop_vision_enabled && !requested {
+        return Vec::new();
+    }
+
+    metadata_string_array(
+        inbound,
+        &[
+            "desktop_vision_images",
+            "desktopVisionImages",
+            "screen_images",
+            "screenImages",
+        ],
+    )
+}
+
 fn metadata_u32(inbound: &InboundMessage, keys: &[&str]) -> Option<u32> {
     for key in keys {
         let Some(value) = inbound.metadata.get(*key) else {
@@ -797,6 +904,74 @@ fn metadata_u32(inbound: &InboundMessage, keys: &[&str]) -> Option<u32> {
 fn metadata_str<'a>(inbound: &'a InboundMessage, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| inbound.metadata.get(*key).and_then(serde_json::Value::as_str))
+}
+
+fn extract_tool_steps(messages: &[ChatMessage]) -> Vec<ExecutionStep> {
+    let mut steps = Vec::new();
+    let mut tool_names_by_id = HashMap::new();
+
+    for message in messages {
+        match message.role.as_str() {
+            "assistant" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) else {
+                    continue;
+                };
+                let Some(tool_calls) = value.get("tool_calls").and_then(serde_json::Value::as_array) else {
+                    continue;
+                };
+                for call in tool_calls {
+                    let id = call.get("id").and_then(serde_json::Value::as_str).unwrap_or("-");
+                    let name = call.get("name").and_then(serde_json::Value::as_str).unwrap_or("unknown_tool");
+                    let args = call
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    tool_names_by_id.insert(id.to_string(), name.to_string());
+                    steps.push(ExecutionStep::done(
+                        format!("调用工具：{name}"),
+                        truncate_for_step(args, 240),
+                    ));
+                }
+            }
+            "tool" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) else {
+                    continue;
+                };
+                let tool_call_id = value
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
+                let name = tool_names_by_id
+                    .get(tool_call_id)
+                    .map(String::as_str)
+                    .unwrap_or("unknown_tool");
+                let content = value
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                steps.push(ExecutionStep::done(
+                    format!("工具完成：{name}"),
+                    truncate_for_step(content, 300),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    steps
+}
+
+fn truncate_for_step(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    let mut out = String::new();
+    for (idx, ch) in trimmed.chars().enumerate() {
+        if idx >= max_chars {
+            out.push('…');
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -840,6 +1015,41 @@ pub struct GatewayRouteRequest {
 pub struct GatewayInboundResponse {
     pub route: RouteDecision,
     pub reply: String,
+    #[serde(default)]
+    pub steps: Vec<ExecutionStep>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionStep {
+    pub title: String,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+impl ExecutionStep {
+    fn done(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            status: "done".to_string(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn running(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            status: "running".to_string(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn error(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            status: "error".to_string(),
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2051,7 +2261,7 @@ mod tests {
     use super::{
         GatewayRuntime, GatewaySessionTreeQuery, SessionLineageMeta, acquire_inbound_slot,
         acquire_subagent_guard, create_tools_for_route, resolve_agent_max_tool_iterations,
-        resolve_agent_timeout_secs, split_session_key,
+        split_session_key,
     };
     use crate::channels::{ChannelKind, InboundMessage};
     use crate::config::{Config, DelegateAgentConfig};
@@ -2061,31 +2271,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::RwLock;
-
-    #[test]
-    fn timeout_defaults_to_600_when_unset() {
-        let config = Config::default();
-        assert_eq!(resolve_agent_timeout_secs(&config, "omninova"), 600);
-    }
-
-    #[test]
-    fn timeout_respects_agents_defaults_value() {
-        let mut config = Config::default();
-        config.agent_defaults_extended.timeout_seconds = Some(42);
-        assert_eq!(resolve_agent_timeout_secs(&config, "omninova"), 42);
-    }
-
-    #[test]
-    fn timeout_prefers_subagent_timeout_for_delegate_route() {
-        let mut config = Config::default();
-        config.agent_defaults_extended.timeout_seconds = Some(50);
-        config.agent_defaults_extended.subagents = Some(crate::config::schema::SubagentsConfig {
-            run_timeout_seconds: Some(12),
-            ..crate::config::schema::SubagentsConfig::default()
-        });
-        assert_eq!(resolve_agent_timeout_secs(&config, "delegate"), 12);
-        assert_eq!(resolve_agent_timeout_secs(&config, "omninova"), 50);
-    }
 
     #[test]
     fn delegate_allowed_tools_filter_default_toolset() {

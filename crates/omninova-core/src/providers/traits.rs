@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// OpenAI 兼容视觉输入：`data:image/...;base64,...` 或 https URL。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 impl ChatMessage {
@@ -14,6 +17,7 @@ impl ChatMessage {
         Self {
             role: "system".into(),
             content: content.into(),
+            images: None,
         }
     }
 
@@ -21,6 +25,20 @@ impl ChatMessage {
         Self {
             role: "user".into(),
             content: content.into(),
+            images: None,
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Self {
+        let images = if images.is_empty() {
+            None
+        } else {
+            Some(images)
+        };
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            images,
         }
     }
 
@@ -28,6 +46,7 @@ impl ChatMessage {
         Self {
             role: "assistant".into(),
             content: content.into(),
+            images: None,
         }
     }
 
@@ -35,7 +54,14 @@ impl ChatMessage {
         Self {
             role: "tool".into(),
             content: content.into(),
+            images: None,
         }
+    }
+
+    /// 持久化会话历史时去掉截图，避免 JSON 膨胀。
+    pub fn strip_images_for_history(mut self) -> Self {
+        self.images = None;
+        self
     }
 }
 

@@ -1,4 +1,6 @@
 mod cli_install;
+mod composer_attachments;
+mod desktop_capture;
 
 use omninova_core::channels::{ChannelKind, InboundMessage};
 use omninova_core::config::{Config, ModelProviderConfig, ProviderConfig, RobotConfig, ChannelsConfig, ChannelEntry};
@@ -159,6 +161,18 @@ struct SetupProviderConfig {
     enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SetupMultimodalConfig {
+    #[serde(default)]
+    desktop_vision_enabled: bool,
+    #[serde(default = "default_desktop_vision_max_dimension_px")]
+    desktop_vision_max_dimension_px: u32,
+}
+
+fn default_desktop_vision_max_dimension_px() -> u32 {
+    1280
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetupAppConfig {
     api_key: Option<String>,
@@ -173,6 +187,8 @@ struct SetupAppConfig {
     providers: Vec<SetupProviderConfig>,
     #[serde(default)]
     channels: Option<SetupChannelsConfig>,
+    #[serde(default)]
+    multimodal: SetupMultimodalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -801,6 +817,10 @@ fn setup_config_from_core(config: &Config) -> SetupAppConfig {
         robot: config.robot.clone(),
         providers,
         channels: Some(channels_from_core(&config.channels_config)),
+        multimodal: SetupMultimodalConfig {
+            desktop_vision_enabled: config.multimodal.desktop_vision_enabled,
+            desktop_vision_max_dimension_px: config.multimodal.desktop_vision_max_dimension_px,
+        },
     }
 }
 
@@ -947,6 +967,12 @@ fn setup_config_to_core(
     if let Some(channels) = setup.channels {
         current.channels_config = channels_to_core(channels);
     }
+
+    current.multimodal.desktop_vision_enabled = setup.multimodal.desktop_vision_enabled;
+    current.multimodal.desktop_vision_max_dimension_px = setup
+        .multimodal
+        .desktop_vision_max_dimension_px
+        .max(320);
 
     ensure_desktop_automation_capabilities(&mut current);
     current.validate_or_bail().map_err(|e| e.to_string())?;
@@ -1190,6 +1216,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             process_message,
@@ -1212,6 +1239,8 @@ pub fn run() {
             cli_install_to_user_path,
             import_skills,
             skills_package_summary,
+            composer_attachments::read_composer_attachments,
+            desktop_capture::capture_desktop_screenshot,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

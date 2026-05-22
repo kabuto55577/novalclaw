@@ -228,13 +228,14 @@ jobs:
         run: |
           set -euo pipefail
           BUNDLE="${{ steps.resolve_path.outputs.bundle_path }}"
-          shopt -s nullglob globstar
           found=0
-          for artifact in "$BUNDLE"/**/*.app "$BUNDLE"/**/*.dmg; do
+          while IFS= read -r artifact; do
             [[ -e "$artifact" ]] || continue
             found=1
             bash ./scripts/verify-macos-signature.sh "$artifact"
-          done
+          done <<EOF
+          $(find "$BUNDLE" \( -type d -name '*.app' -o -type f -name '*.dmg' \))
+          EOF
           if [ "$found" -eq 0 ]; then
             echo "::warning::No .app/.dmg under $BUNDLE — skip signature verify"
           fi
@@ -246,6 +247,10 @@ jobs:
           ./release-assets
           ${{ matrix.asset_platform }}
           ${{ steps.meta.outputs.version }}
+
+      - name: Attach macOS Gatekeeper install guide
+        if: runner.os == 'macOS'
+        run: cp ../../docs/macOS-安装与修复.txt ./release-assets/
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@v4
@@ -556,4 +561,5 @@ jobs:
             release-assets/**/*.aab
             release-assets/**/*.ipa
             release-assets/**/IOS_INSTALL.txt
+            release-assets/**/macOS-安装与修复.txt
             release-assets/SHA256SUMS.txt

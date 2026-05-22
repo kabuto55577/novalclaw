@@ -33,7 +33,7 @@ struct NativeChatRequest {
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,7 +129,6 @@ impl OpenAiProvider {
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build reqwest client");
 
@@ -159,6 +158,25 @@ impl OpenAiProvider {
                     })
                     .collect()
             })
+    }
+
+    fn user_content_value(message: &ChatMessage) -> serde_json::Value {
+        let images = message.images.as_deref().unwrap_or_default();
+        if images.is_empty() {
+            return serde_json::Value::String(message.content.clone());
+        }
+
+        let mut parts = vec![serde_json::json!({
+            "type": "text",
+            "text": message.content,
+        })];
+        for url in images {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": url },
+            }));
+        }
+        serde_json::Value::Array(parts)
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
@@ -194,7 +212,7 @@ impl OpenAiProvider {
                                     .map(ToString::to_string);
                                 return NativeMessage {
                                     role: "assistant".to_string(),
-                                    content,
+                                    content: content.map(serde_json::Value::String),
                                     tool_call_id: None,
                                     tool_calls: Some(tool_calls),
                                     reasoning_content,
@@ -216,7 +234,7 @@ impl OpenAiProvider {
                             .map(ToString::to_string);
                         return NativeMessage {
                             role: "tool".to_string(),
-                            content,
+                            content: content.map(serde_json::Value::String),
                             tool_call_id,
                             tool_calls: None,
                             reasoning_content: None,
@@ -224,9 +242,15 @@ impl OpenAiProvider {
                     }
                 }
 
+                let content = if m.role == "user" {
+                    Some(Self::user_content_value(m))
+                } else {
+                    Some(serde_json::Value::String(m.content.clone()))
+                };
+
                 NativeMessage {
                     role: m.role.clone(),
-                    content: Some(m.content.clone()),
+                    content,
                     tool_call_id: None,
                     tool_calls: None,
                     reasoning_content: None,
@@ -319,7 +343,7 @@ impl Provider for OpenAiProvider {
             .map_err(|e| {
                 if e.is_timeout() {
                     anyhow::anyhow!(
-                        "请求超时：调用 {} 超时（60s），请检查网络连通性或 API 服务可用性",
+                        "请求超时：调用 {} 超时，请检查网络连通性或 API 服务可用性",
                         self.base_url
                     )
                 } else if e.is_connect() {

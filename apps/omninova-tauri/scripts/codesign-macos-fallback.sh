@@ -25,9 +25,9 @@ sign_app() {
   codesign --force --deep --sign - "${app}"
 }
 
-shopt -s nullglob globstar
+# macOS CI uses Bash 3.2 (no globstar); use find instead of **/*.app
 signed=0
-for app in "${BUNDLE_ROOT}"/**/*.app; do
+while IFS= read -r app; do
   [[ -d "${app}" ]] || continue
   if codesign --verify --deep --strict "${app}" 2>/dev/null; then
     echo "[codesign] Already signed: ${app}"
@@ -35,7 +35,9 @@ for app in "${BUNDLE_ROOT}"/**/*.app; do
   fi
   sign_app "${app}"
   signed=$((signed + 1))
-done
+done <<EOF
+$(find "${BUNDLE_ROOT}" -type d -name '*.app')
+EOF
 
 if [[ "${signed}" -eq 0 ]]; then
   echo "[codesign] No unsigned .app found under ${BUNDLE_ROOT}"

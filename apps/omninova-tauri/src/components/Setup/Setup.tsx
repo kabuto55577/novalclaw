@@ -44,6 +44,10 @@ const initialConfig: Config = {
     max_tool_iterations: 20,
     compact_context: true,
   },
+  multimodal: {
+    desktop_vision_enabled: false,
+    desktop_vision_max_dimension_px: 1280,
+  },
 };
 
 export type SetupTab = "general" | "providers" | "channels" | "skills" | "persona";
@@ -441,6 +445,58 @@ export function Setup({
                       })
                     }
                     placeholder="~/.omninoval"
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="setup-section">
+              <h2>桌面视觉监控</h2>
+              <p className="setup-embed-sub" style={{ marginTop: 0, marginBottom: "0.75rem" }}>
+                开启后，聊天区可打开「桌面视觉」开关；每次发送消息时会截取主屏幕并附加到请求中，供支持视觉的多模态模型分析（需使用
+                GPT-4o、DeepSeek-VL、豆包视觉等 OpenAI 兼容视觉模型）。macOS 需在
+                系统设置 → 隐私与安全性 → 屏幕录制 中授权本应用。
+              </p>
+              <div className="setup-grid">
+                <label className="setup-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={config.multimodal?.desktop_vision_enabled ?? false}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        multimodal: {
+                          ...config.multimodal,
+                          desktop_vision_enabled: event.target.checked,
+                          desktop_vision_max_dimension_px:
+                            config.multimodal?.desktop_vision_max_dimension_px ?? 1280,
+                        },
+                      })
+                    }
+                  />
+                  <span>允许桌面视觉监控（总开关）</span>
+                </label>
+                <label>
+                  截图最长边（像素）
+                  <input
+                    type="number"
+                    min={320}
+                    max={4096}
+                    value={config.multimodal?.desktop_vision_max_dimension_px ?? 1280}
+                    disabled={!config.multimodal?.desktop_vision_enabled}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        multimodal: {
+                          desktop_vision_enabled:
+                            config.multimodal?.desktop_vision_enabled ?? false,
+                          desktop_vision_max_dimension_px: Math.max(
+                            320,
+                            Number(event.target.value) || 1280
+                          ),
+                        },
+                      })
+                    }
                   />
                 </label>
               </div>

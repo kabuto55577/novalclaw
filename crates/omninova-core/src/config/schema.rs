@@ -1280,12 +1280,32 @@ pub struct CostConfig {
 // Multimodal
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+fn default_desktop_vision_max_dimension_px() -> u32 {
+    1280
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultimodalConfig {
     #[serde(default)]
     pub vision_enabled: bool,
     #[serde(default)]
     pub audio_enabled: bool,
+    /// 桌面视觉监控：发送消息时截取主屏幕并传给支持视觉的模型。
+    #[serde(default)]
+    pub desktop_vision_enabled: bool,
+    #[serde(default = "default_desktop_vision_max_dimension_px")]
+    pub desktop_vision_max_dimension_px: u32,
+}
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self {
+            vision_enabled: false,
+            audio_enabled: false,
+            desktop_vision_enabled: false,
+            desktop_vision_max_dimension_px: default_desktop_vision_max_dimension_px(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

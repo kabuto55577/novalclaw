@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-const isTauriEnvironment = () =>
+export const isTauriEnvironment = () =>
   typeof window !== "undefined" &&
   Boolean(
     (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__

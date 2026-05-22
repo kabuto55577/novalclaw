@@ -1,3 +1,4 @@
+use crate::agent::history::sanitize_messages_for_provider;
 use crate::providers::{ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::tools::{Tool, ToolSpec};
 use anyhow::Result;
@@ -28,6 +29,7 @@ impl<'a> AgentDispatcher<'a> {
 
     /// Run the tool-calling loop against `messages` and return final assistant text.
     pub async fn run(&self, messages: &mut Vec<ChatMessage>) -> Result<String> {
+        *messages = sanitize_messages_for_provider(std::mem::take(messages));
         let iteration_cap = self.max_tool_iterations.max(1);
 
         for _ in 0..iteration_cap {

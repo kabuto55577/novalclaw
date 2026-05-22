@@ -182,7 +182,7 @@ impl OpenAiProvider {
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
         messages
             .iter()
-            .map(|m| {
+            .filter_map(|m| {
                 if m.role == "assistant" {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                         if let Some(tool_calls_value) = value.get("tool_calls") {
@@ -191,32 +191,34 @@ impl OpenAiProvider {
                                     tool_calls_value.clone(),
                                 )
                             {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tc.name,
-                                            arguments: tc.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                let reasoning_content = value
-                                    .get("reasoning_content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content: content.map(serde_json::Value::String),
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                    reasoning_content,
-                                };
+                                if !parsed_calls.is_empty() {
+                                    let tool_calls = parsed_calls
+                                        .into_iter()
+                                        .map(|tc| NativeToolCall {
+                                            id: Some(tc.id),
+                                            kind: Some("function".to_string()),
+                                            function: NativeFunctionCall {
+                                                name: tc.name,
+                                                arguments: tc.arguments,
+                                            },
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let content = value
+                                        .get("content")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(ToString::to_string);
+                                    let reasoning_content = value
+                                        .get("reasoning_content")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(ToString::to_string);
+                                    return Some(NativeMessage {
+                                        role: "assistant".to_string(),
+                                        content: content.map(serde_json::Value::String),
+                                        tool_call_id: None,
+                                        tool_calls: Some(tool_calls),
+                                        reasoning_content,
+                                    });
+                                }
                             }
                         }
                     }
@@ -227,19 +229,23 @@ impl OpenAiProvider {
                         let tool_call_id = value
                             .get("tool_call_id")
                             .and_then(serde_json::Value::as_str)
+                            .filter(|id| !id.is_empty())
                             .map(ToString::to_string);
                         let content = value
                             .get("content")
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string);
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content: content.map(serde_json::Value::String),
-                            tool_call_id,
-                            tool_calls: None,
-                            reasoning_content: None,
-                        };
+                        if tool_call_id.is_some() {
+                            return Some(NativeMessage {
+                                role: "tool".to_string(),
+                                content: content.map(serde_json::Value::String),
+                                tool_call_id,
+                                tool_calls: None,
+                                reasoning_content: None,
+                            });
+                        }
                     }
+                    return None;
                 }
 
                 let content = if m.role == "user" {
@@ -248,13 +254,13 @@ impl OpenAiProvider {
                     Some(serde_json::Value::String(m.content.clone()))
                 };
 
-                NativeMessage {
+                Some(NativeMessage {
                     role: m.role.clone(),
                     content,
                     tool_call_id: None,
                     tool_calls: None,
                     reasoning_content: None,
-                }
+                })
             })
             .collect()
     }

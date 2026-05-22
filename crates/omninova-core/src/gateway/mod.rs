@@ -23,6 +23,7 @@ use crate::tools::{
     WebFetchTool, WebSearchTool,
 };
 use crate::util::auth::verify_webhook_signature_with_policy_options;
+use crate::agent::sanitize_messages_for_provider;
 use crate::Agent;
 use std::hash::{Hash, Hasher};
 use std::collections::{HashMap, HashSet};
@@ -216,11 +217,12 @@ impl GatewayRuntime {
             let _guard = self.session_store_guard.lock().await;
             match load_session_history(&cfg, &inbound.channel, session_id).await {
                 Ok(history) if !history.is_empty() => {
+                    let sanitized = sanitize_messages_for_provider(history);
                     steps.push(ExecutionStep::done(
                         "加载会话历史",
-                        format!("历史消息数：{}", history.len()),
+                        format!("历史消息数：{}", sanitized.len()),
                     ));
-                    agent.import_messages(history)
+                    agent.import_messages(sanitized)
                 }
                 Ok(_) => steps.push(ExecutionStep::done("加载会话历史", "无历史消息")),
                 Err(e) => {
@@ -1733,6 +1735,7 @@ async fn save_session_history(
         let start = messages.len() - max_history_messages;
         messages = messages.split_off(start);
     }
+    messages = sanitize_messages_for_provider(messages);
 
     let path = session_store_path(config);
     if let Some(parent) = path.parent() {

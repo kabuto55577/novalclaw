@@ -104,6 +104,26 @@ export function saveChatStorage(snapshot: ChatStorageSnapshot): void {
   }
 }
 
+/** 避免网关历史与本地 state 相同时触发整页重绘/滚动 */
+export function areStoredMessagesEqual(
+  a: StoredChatMessage[],
+  b: StoredChatMessage[]
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      left.role !== right.role ||
+      left.content !== right.content ||
+      (left.agent ?? "") !== (right.agent ?? "")
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function toUiMessages(
   messages: GatewayChatHistoryMessage[]
 ): StoredChatMessage[] {
@@ -182,9 +202,12 @@ export function mergeAvatarSessions(
       lastAt: a.lastAt || existing.lastAt,
     });
   }
+  const orderIndex = new Map(local.map((a, i) => [a.sessionId, i]));
   return Array.from(map.values()).sort((a, b) => {
     if (a.sessionId === "omninova-chat-session") return -1;
     if (b.sessionId === "omninova-chat-session") return 1;
-    return b.lastAt.localeCompare(a.lastAt);
+    const cmp = b.lastAt.localeCompare(a.lastAt);
+    if (cmp !== 0) return cmp;
+    return (orderIndex.get(a.sessionId) ?? 0) - (orderIndex.get(b.sessionId) ?? 0);
   });
 }

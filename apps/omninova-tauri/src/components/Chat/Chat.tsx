@@ -7,6 +7,7 @@ import {
   readComposerAttachmentsFromPaths,
 } from "../../utils/composerAttachments";
 import {
+  areStoredMessagesEqual,
   fetchSessionHistory,
   fetchWebSessionsFromGateway,
   formatTime,
@@ -251,7 +252,9 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [availableModels] = useState<string[]>(["auto", "openai", "anthropic", "gemini", "ollama"]);
   const [selectedModel, setSelectedModel] = useState("auto");
   const [activeSteps, setActiveSteps] = useState<ExecutionStep[]>([]);
-  const listEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const historyLoadGenRef = useRef(0);
   const cancelledRef = useRef(false);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [composerDragActive, setComposerDragActive] = useState(false);
@@ -271,32 +274,37 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   }, [initialSidebarTab]);
 
   const loadSessionHistory = useCallback(
-    async (avatarId: string, targetSessionId: string, preferGateway: boolean) => {
+    async (
+      avatarId: string,
+      targetSessionId: string,
+      preferGateway: boolean,
+      options?: { silent?: boolean }
+    ) => {
       if (!preferGateway) {
         return;
       }
-      setHistoryLoading(true);
+      const gen = ++historyLoadGenRef.current;
+      if (!options?.silent) {
+        setHistoryLoading(true);
+      }
       try {
         const remote = await fetchSessionHistory(targetSessionId);
-        setMessagesBySession((prev) => ({
-          ...prev,
-          [avatarId]:
-            remote.length > 0 ? remote : (prev[avatarId] ?? []),
-        }));
-        if (remote.length > 0) {
-          const last = remote[remote.length - 1];
-          if (last.role === "assistant" || last.role === "user") {
-            setAvatars((prev) =>
-              prev.map((a) =>
-                a.id === avatarId ? { ...a, lastAt: formatTime(new Date()) } : a
-              )
-            );
+        if (gen !== historyLoadGenRef.current) return;
+
+        setMessagesBySession((prev) => {
+          const current = prev[avatarId] ?? [];
+          const next = remote.length > 0 ? remote : current;
+          if (areStoredMessagesEqual(current, next)) {
+            return prev;
           }
-        }
+          return { ...prev, [avatarId]: next };
+        });
       } catch {
         // 保留本地缓存
       } finally {
-        setHistoryLoading(false);
+        if (gen === historyLoadGenRef.current && !options?.silent) {
+          setHistoryLoading(false);
+        }
       }
     },
     []
@@ -305,7 +313,22 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const syncChatSessions = useCallback(async () => {
     try {
       const remote = await fetchWebSessionsFromGateway();
-      setAvatars((prev) => mergeAvatarSessions(prev, remote));
+      setAvatars((prev) => {
+        const merged = mergeAvatarSessions(prev, remote);
+        if (
+          merged.length === prev.length &&
+          merged.every(
+            (a, i) =>
+              prev[i]?.id === a.id &&
+              prev[i]?.sessionId === a.sessionId &&
+              prev[i]?.name === a.name &&
+              prev[i]?.lastAt === a.lastAt
+          )
+        ) {
+          return prev;
+        }
+        return merged;
+      });
     } catch {
       // 网关未就绪时仅使用本地会话列表
     }
@@ -331,14 +354,9 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   }, [gatewayStatus, syncChatSessions]);
 
   useEffect(() => {
-    const session = avatars.find((a) => a.id === activeAvatarId);
-    if (!session) return;
-    void loadSessionHistory(
-      activeAvatarId,
-      session.sessionId,
-      gatewayStatus === "connected"
-    );
-  }, [activeAvatarId, avatars, gatewayStatus, loadSessionHistory]);
+    if (!sessionId || gatewayStatus !== "connected") return;
+    void loadSessionHistory(activeAvatarId, sessionId, true);
+  }, [activeAvatarId, sessionId, gatewayStatus, loadSessionHistory]);
 
   useEffect(() => {
     void invokeTauri<Config>("get_setup_config")
@@ -355,9 +373,24 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       .catch(() => {});
   }, []);
 
+  const scrollMessagesToEnd = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior });
+  }, []);
+
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 80;
+  }, []);
+
   useEffect(() => {
-    listEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (!stickToBottomRef.current && !sending) return;
+    scrollMessagesToEnd("auto");
+  }, [messages, sending, activeSteps, elapsedSec, scrollMessagesToEnd]);
 
   useEffect(() => {
     return () => {
@@ -475,6 +508,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       { title: "路由选择", status: "running", detail: "正在选择 Agent / Provider / Model" },
     ]);
 
+    stickToBottomRef.current = true;
     setMessagesBySession((prev) => ({
       ...prev,
       [activeAvatarId]: [...(prev[activeAvatarId] ?? []), { role: "user", content: text }],
@@ -603,9 +637,6 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
-      }
-      if (gatewayStatus === "connected" && !cancelledRef.current) {
-        void loadSessionHistory(activeAvatarId, sessionId, true);
       }
     }
   };
@@ -930,18 +961,31 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
               >
                 ↻
               </button>
-              {historyLoading ? (
-                <span className="chat-history-loading">加载历史…</span>
-              ) : null}
-              {sending ? (
-                <span className="chat-typing-badge">
-                  正在回复 {elapsedSec}s
-                </span>
-              ) : null}
+              <span
+                className="chat-main-toolbar-status"
+                aria-live="polite"
+                aria-busy={historyLoading || sending}
+              >
+                {historyLoading ? (
+                  <span className="chat-history-loading">加载历史…</span>
+                ) : sending ? (
+                  <span className="chat-typing-badge">
+                    正在回复 {elapsedSec}s
+                  </span>
+                ) : (
+                  <span className="chat-toolbar-status-placeholder" aria-hidden>
+                    &nbsp;
+                  </span>
+                )}
+              </span>
             </div>
           </div>
 
-          <div className="chat-messages">
+          <div
+            ref={messagesScrollRef}
+            className="chat-messages"
+            onScroll={handleMessagesScroll}
+          >
             {historyLoading && messages.length === 0 ? (
               <div className="chat-hero">
                 <p className="chat-hero-sub">正在加载会话历史…</p>
@@ -990,7 +1034,6 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                 {activeSteps.length ? <ExecutionSteps steps={activeSteps} /> : null}
               </div>
             )}
-            <div ref={listEndRef} />
           </div>
 
           {error && (

@@ -1070,6 +1070,20 @@
   gap: 8px;
 }
 
+.chat-main-toolbar-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 6.5rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.chat-toolbar-status-placeholder {
+  visibility: hidden;
+  user-select: none;
+}
+
 .chat-icon-btn {
   width: 36px;
   height: 36px;
@@ -1652,6 +1666,7 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
   display: flex;
   flex-direction: column;
   gap: 12px;

@@ -1227,6 +1227,12 @@
   font-weight: 500;
 }
 
+.chat-history-loading {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .chat-hero {
   margin: auto;
   max-width: 520px;

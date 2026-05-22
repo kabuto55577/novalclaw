@@ -318,6 +318,19 @@ export interface GatewayInboundResponse {
   steps?: ExecutionStep[];
 }
 
+export interface GatewayChatHistoryMessage {
+  role: string;
+  content: string;
+  agent?: string | null;
+}
+
+export interface GatewaySessionHistoryResponse {
+  sessionId: string;
+  channel: string;
+  messages: GatewayChatHistoryMessage[];
+  updatedAt?: number | null;
+}
+
 export interface ExecutionStep {
   title: string;
   status?: "pending" | "running" | "done" | "error";

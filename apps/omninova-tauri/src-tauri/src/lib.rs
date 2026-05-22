@@ -5,8 +5,8 @@ mod desktop_capture;
 use omninova_core::channels::{ChannelKind, InboundMessage};
 use omninova_core::config::{Config, ModelProviderConfig, ProviderConfig, RobotConfig, ChannelsConfig, ChannelEntry};
 use omninova_core::gateway::{
-    GatewayHealth, GatewayInboundResponse, GatewayRuntime, GatewaySessionTreeQuery,
-    GatewaySessionTreeResponse,
+    GatewayHealth, GatewayInboundResponse, GatewayRuntime, GatewaySessionHistoryResponse,
+    GatewaySessionTreeQuery, GatewaySessionTreeResponse,
 };
 use omninova_core::providers::{ProviderSelection, build_provider_with_selection};
 use omninova_core::routing::RouteDecision;
@@ -483,6 +483,29 @@ async fn process_inbound_message(
         .process_inbound(&inbound)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiSessionHistoryQuery {
+    session_id: String,
+    #[serde(default)]
+    channel: Option<ChannelKind>,
+}
+
+#[tauri::command]
+async fn get_chat_session_history(
+    query: UiSessionHistoryQuery,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<GatewaySessionHistoryResponse, String> {
+    let runtime = {
+        let app_state = state.lock().await;
+        app_state.runtime.clone()
+    };
+    let channel = query.channel.unwrap_or(ChannelKind::Web);
+    Ok(runtime
+        .get_session_history(&channel, &query.session_id)
+        .await)
 }
 
 #[tauri::command]
@@ -1230,6 +1253,7 @@ pub fn run() {
             provider_health_overview,
             route_inbound_message,
             process_inbound_message,
+            get_chat_session_history,
             session_tree_snapshot,
             check_browser_dep,
             install_browser_dep,

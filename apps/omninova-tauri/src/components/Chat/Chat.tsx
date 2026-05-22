@@ -6,6 +6,16 @@ import {
   pickComposerAttachmentPaths,
   readComposerAttachmentsFromPaths,
 } from "../../utils/composerAttachments";
+import {
+  fetchSessionHistory,
+  fetchWebSessionsFromGateway,
+  formatTime,
+  loadChatStorage,
+  mergeAvatarSessions,
+  saveChatStorage,
+  type StoredAvatarSession,
+  type StoredChatMessage,
+} from "../../utils/chatStorage";
 import type {
   Config,
   GatewayHealth,
@@ -182,18 +192,8 @@ async function formatDroppedFilesContent(files: FileList | readonly File[]): Pro
   return parts.join("");
 }
 
-interface ChatMessage {
-  role: "user" | "assistant" | "error";
-  content: string;
-  agent?: string;
+interface ChatMessage extends StoredChatMessage {
   steps?: ExecutionStep[];
-}
-
-interface AvatarSession {
-  id: string;
-  name: string;
-  sessionId: string;
-  lastAt: string;
 }
 
 type SidebarTab = "avatars" | "channels" | "scheduled";
@@ -227,19 +227,10 @@ interface ChatProps {
   initialSidebarTab?: SidebarTab;
 }
 
-function formatTime(date: Date) {
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
-
 export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
-  const [avatars, setAvatars] = useState<AvatarSession[]>([
-    { id: "main", name: "Main", sessionId: "omninova-chat-session", lastAt: formatTime(new Date()) },
-  ]);
-  const [activeAvatarId, setActiveAvatarId] = useState("main");
+  const initialStorage = useMemo(() => loadChatStorage(), []);
+  const [avatars, setAvatars] = useState<StoredAvatarSession[]>(initialStorage.avatars);
+  const [activeAvatarId, setActiveAvatarId] = useState(initialStorage.activeAvatarId);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>(initialSidebarTab);
   const [channels, setChannels] = useState<ImChannelEntry[]>([]);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskEntry[]>([]);
@@ -247,9 +238,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [newChannelPlatform, setNewChannelPlatform] = useState(IM_PLATFORM_OPTIONS[0]);
   const [newTaskName, setNewTaskName] = useState("");
   const [newTaskCron, setNewTaskCron] = useState("0 9 * * *");
-  const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({
-    main: [],
-  });
+  const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>(
+    initialStorage.messagesBySession
+  );
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -278,11 +270,75 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     setSidebarTab(initialSidebarTab);
   }, [initialSidebarTab]);
 
+  const loadSessionHistory = useCallback(
+    async (avatarId: string, targetSessionId: string, preferGateway: boolean) => {
+      if (!preferGateway) {
+        return;
+      }
+      setHistoryLoading(true);
+      try {
+        const remote = await fetchSessionHistory(targetSessionId);
+        setMessagesBySession((prev) => ({
+          ...prev,
+          [avatarId]:
+            remote.length > 0 ? remote : (prev[avatarId] ?? []),
+        }));
+        if (remote.length > 0) {
+          const last = remote[remote.length - 1];
+          if (last.role === "assistant" || last.role === "user") {
+            setAvatars((prev) =>
+              prev.map((a) =>
+                a.id === avatarId ? { ...a, lastAt: formatTime(new Date()) } : a
+              )
+            );
+          }
+        }
+      } catch {
+        // 保留本地缓存
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    []
+  );
+
+  const syncChatSessions = useCallback(async () => {
+    try {
+      const remote = await fetchWebSessionsFromGateway();
+      setAvatars((prev) => mergeAvatarSessions(prev, remote));
+    } catch {
+      // 网关未就绪时仅使用本地会话列表
+    }
+  }, []);
+
+  useEffect(() => {
+    saveChatStorage({
+      avatars,
+      activeAvatarId,
+      messagesBySession,
+    });
+  }, [avatars, activeAvatarId, messagesBySession]);
+
   useEffect(() => {
     void refreshGatewayStatus();
     const t = setInterval(refreshGatewayStatus, GATEWAY_STATUS_POLL_MS);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (gatewayStatus !== "connected") return;
+    void syncChatSessions();
+  }, [gatewayStatus, syncChatSessions]);
+
+  useEffect(() => {
+    const session = avatars.find((a) => a.id === activeAvatarId);
+    if (!session) return;
+    void loadSessionHistory(
+      activeAvatarId,
+      session.sessionId,
+      gatewayStatus === "connected"
+    );
+  }, [activeAvatarId, avatars, gatewayStatus, loadSessionHistory]);
 
   useEffect(() => {
     void invokeTauri<Config>("get_setup_config")
@@ -322,14 +378,32 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
 
   const handleAddAvatar = () => {
     const id = `avatar-${Date.now()}`;
-    const name = `分身 ${avatars.length + 1}`;
+    const sessionId = `session-${id}`;
+    const name = `对话 ${avatars.length}`;
     setAvatars((prev) => [
+      { id, name, sessionId, lastAt: formatTime(new Date()) },
       ...prev,
-      { id, name, sessionId: `session-${id}`, lastAt: formatTime(new Date()) },
     ]);
     setMessagesBySession((prev) => ({ ...prev, [id]: [] }));
     setActiveAvatarId(id);
   };
+
+  const handleRefreshHistory = useCallback(() => {
+    void refreshGatewayStatus();
+    if (gatewayStatus === "connected") {
+      void syncChatSessions();
+    }
+    const session = avatars.find((a) => a.id === activeAvatarId);
+    if (session) {
+      void loadSessionHistory(activeAvatarId, session.sessionId, gatewayStatus === "connected");
+    }
+  }, [
+    activeAvatarId,
+    avatars,
+    gatewayStatus,
+    loadSessionHistory,
+    syncChatSessions,
+  ]);
 
   const handleCreateChannel = () => {
     const name = newChannelName.trim();
@@ -529,6 +603,9 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
+      }
+      if (gatewayStatus === "connected" && !cancelledRef.current) {
+        void loadSessionHistory(activeAvatarId, sessionId, true);
       }
     }
   };
@@ -839,11 +916,23 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
               <button
                 type="button"
                 className="chat-icon-btn"
+                title="从网关重新加载当前会话历史"
+                disabled={historyLoading || gatewayStatus !== "connected"}
+                onClick={() => void handleRefreshHistory()}
+              >
+                ⟳
+              </button>
+              <button
+                type="button"
+                className="chat-icon-btn"
                 title="刷新网关状态"
                 onClick={() => void refreshGatewayStatus()}
               >
                 ↻
               </button>
+              {historyLoading ? (
+                <span className="chat-history-loading">加载历史…</span>
+              ) : null}
               {sending ? (
                 <span className="chat-typing-badge">
                   正在回复 {elapsedSec}s
@@ -853,11 +942,15 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
           </div>
 
           <div className="chat-messages">
-            {messages.length === 0 ? (
+            {historyLoading && messages.length === 0 ? (
+              <div className="chat-hero">
+                <p className="chat-hero-sub">正在加载会话历史…</p>
+              </div>
+            ) : messages.length === 0 ? (
               <div className="chat-hero">
                 <h1 className="chat-hero-title">我能为你做些什么？</h1>
                 <p className="chat-hero-sub">
-                  与 {activeSession?.name ?? "Main"} 对话，或通过侧栏管理频道与定时任务。
+                  与 {activeSession?.name ?? "Main"} 对话；历史记录会保存在网关并在下次打开时恢复。
                 </p>
                 <div className="chat-quick-pills">
                   {quickPrompts.map((q) => (

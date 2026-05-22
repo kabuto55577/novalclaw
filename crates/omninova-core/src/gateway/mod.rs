@@ -474,6 +474,29 @@ impl GatewayRuntime {
             .await
     }
 
+    /// 供桌面聊天 UI 展示的会话历史（过滤 system/tool 与纯工具调用轮次）。
+    pub async fn get_session_history(
+        &self,
+        channel: &ChannelKind,
+        session_id: &str,
+    ) -> GatewaySessionHistoryResponse {
+        let cfg = self.config.read().await.clone();
+        let messages = load_session_history(&cfg, channel, session_id)
+            .await
+            .unwrap_or_default();
+        let updated_at = load_session_record(&cfg, channel, session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.updated_at);
+        GatewaySessionHistoryResponse {
+            session_id: session_id.to_string(),
+            channel: channel_label(channel),
+            messages: messages_for_chat_ui(&messages),
+            updated_at,
+        }
+    }
+
     pub async fn session_tree_snapshot_filtered(
         &self,
         query: &GatewaySessionTreeQuery,
@@ -1114,6 +1137,24 @@ pub struct GatewaySessionTreeQuery {
     pub sort_order: Option<String>,
 }
 
+/// 聊天界面可展示的一条历史消息。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GatewayChatMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GatewaySessionHistoryResponse {
+    pub session_id: String,
+    pub channel: String,
+    pub messages: Vec<GatewayChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GatewaySessionTreeNode {
     pub session_key: Option<String>,
@@ -1700,6 +1741,70 @@ fn compute_session_tree_stats(entries: &[GatewaySessionTreeNode]) -> GatewaySess
 
 fn now_unix_ts() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+fn channel_label(channel: &ChannelKind) -> String {
+    match channel {
+        ChannelKind::Web => "web".to_string(),
+        ChannelKind::WebChat => "webchat".to_string(),
+        ChannelKind::Cli => "cli".to_string(),
+        other => format!("{:?}", other).to_lowercase(),
+    }
+}
+
+/// 将网关持久化的 `ChatMessage` 转为 UI 气泡列表。
+fn messages_for_chat_ui(messages: &[ChatMessage]) -> Vec<GatewayChatMessage> {
+    let mut out = Vec::new();
+    for msg in messages {
+        match msg.role.as_str() {
+            "user" => {
+                let text = msg.content.trim();
+                if !text.is_empty() {
+                    out.push(GatewayChatMessage {
+                        role: "user".into(),
+                        content: msg.content.clone(),
+                        agent: None,
+                    });
+                }
+            }
+            "assistant" => {
+                if let Some(text) = assistant_text_for_ui(&msg.content) {
+                    out.push(GatewayChatMessage {
+                        role: "assistant".into(),
+                        content: text,
+                        agent: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn assistant_text_for_ui(content: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        let has_tool_calls = value
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if let Some(text) = value
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            return Some(text.to_string());
+        }
+        if has_tool_calls {
+            return None;
+        }
+    }
+    let trimmed = content.trim();
+    if trimmed.is_empty() || trimmed.starts_with('{') {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 async fn load_session_history(

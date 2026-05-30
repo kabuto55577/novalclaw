@@ -48,6 +48,14 @@ const initialConfig: Config = {
     desktop_vision_enabled: false,
     desktop_vision_max_dimension_px: 1280,
   },
+  observability: {
+    prometheus_enabled: false,
+    prometheus_port: 9090,
+  },
+  audit: {
+    enabled: false,
+    record_arguments: false,
+  },
 };
 
 export type SetupTab = "general" | "providers" | "channels" | "skills" | "persona";
@@ -493,6 +501,92 @@ export function Setup({
                           desktop_vision_max_dimension_px: Math.max(
                             320,
                             Number(event.target.value) || 1280
+                          ),
+                        },
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="setup-section">
+              <h2>审计与可观测性</h2>
+              <p className="setup-embed-sub" style={{ marginTop: 0, marginBottom: "0.75rem" }}>
+                全链路审计写入工作区 <code>.omninova-audit.log</code>（JSONL）。
+                Prometheus 指标在网关独立端口暴露（默认 9090），主网关仍保留{" "}
+                <code>/metrics</code> 路径；可在 Grafana 导入{" "}
+                <code>docs/grafana/omninova-dashboard.json</code>。
+              </p>
+              <div className="setup-grid">
+                <label className="setup-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={config.audit?.enabled ?? false}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        audit: {
+                          ...config.audit,
+                          enabled: event.target.checked,
+                          record_arguments: config.audit?.record_arguments ?? false,
+                        },
+                      })
+                    }
+                  />
+                  <span>启用全链路审计日志</span>
+                </label>
+                <label className="setup-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={config.audit?.record_arguments ?? false}
+                    disabled={!config.audit?.enabled}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        audit: {
+                          enabled: config.audit?.enabled ?? false,
+                          record_arguments: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  <span>审计记录工具参数（敏感，默认关闭）</span>
+                </label>
+                <label className="setup-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={config.observability?.prometheus_enabled ?? false}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        observability: {
+                          ...config.observability,
+                          prometheus_enabled: event.target.checked,
+                          prometheus_port: config.observability?.prometheus_port ?? 9090,
+                        },
+                      })
+                    }
+                  />
+                  <span>启用 Prometheus 指标</span>
+                </label>
+                <label>
+                  Prometheus 端口
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    value={config.observability?.prometheus_port ?? 9090}
+                    disabled={!config.observability?.prometheus_enabled}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        observability: {
+                          prometheus_enabled:
+                            config.observability?.prometheus_enabled ?? false,
+                          prometheus_port: Math.min(
+                            65535,
+                            Math.max(1024, Number(event.target.value) || 9090)
                           ),
                         },
                       })

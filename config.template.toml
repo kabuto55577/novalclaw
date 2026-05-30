@@ -36,6 +36,7 @@
 # default_model = "deepseek-chat"
 # models = ["deepseek-chat", "deepseek-reasoner", "deepseek-r1"]
 # enabled = true
+# timeout_secs = 120
 #
 # [model_providers.qwen]
 # api_key_env = "DASHSCOPE_API_KEY"
@@ -114,9 +115,25 @@
 #
 # [security.sandbox]
 # enabled = false
+# workspace_jail = true
+# strip_environment = true
+# allowed_env_vars = []
 #
 # [security.audit]
 # enabled = false
+# log_file = "~/.omninova/.omninova-audit.log"
+# record_arguments = false
+#
+# [security.tool_policy]
+# enabled = true
+# allowed_tools = []
+# denied_tools = []
+#
+# [approvals]
+# enabled = true
+# mode = "supervised"
+# auto_approve = ["file_read", "memory_recall"]
+# require_approval = ["shell", "file_write", "file_edit", "git_operations", "browser", "http_request"]
 
 # --- Runtime ---
 # [runtime]
@@ -360,7 +377,7 @@
 # --- Observability ---
 # [observability]
 # log_level = "info"
-# prometheus_enabled = false
+# prometheus_enabled = true
 # prometheus_port = 9090
 # tracing_enabled = false
 

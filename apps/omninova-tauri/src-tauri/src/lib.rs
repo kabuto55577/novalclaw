@@ -173,6 +173,22 @@ fn default_desktop_vision_max_dimension_px() -> u32 {
     1280
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SetupObservabilityConfig {
+    #[serde(default)]
+    prometheus_enabled: bool,
+    #[serde(default)]
+    prometheus_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SetupAuditConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    record_arguments: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetupAppConfig {
     api_key: Option<String>,
@@ -189,6 +205,10 @@ struct SetupAppConfig {
     channels: Option<SetupChannelsConfig>,
     #[serde(default)]
     multimodal: SetupMultimodalConfig,
+    #[serde(default)]
+    observability: SetupObservabilityConfig,
+    #[serde(default)]
+    audit: SetupAuditConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -844,6 +864,14 @@ fn setup_config_from_core(config: &Config) -> SetupAppConfig {
             desktop_vision_enabled: config.multimodal.desktop_vision_enabled,
             desktop_vision_max_dimension_px: config.multimodal.desktop_vision_max_dimension_px,
         },
+        observability: SetupObservabilityConfig {
+            prometheus_enabled: config.observability.prometheus_enabled,
+            prometheus_port: config.observability.prometheus_port,
+        },
+        audit: SetupAuditConfig {
+            enabled: config.security.audit.enabled,
+            record_arguments: config.security.audit.record_arguments,
+        },
     }
 }
 
@@ -996,6 +1024,11 @@ fn setup_config_to_core(
         .multimodal
         .desktop_vision_max_dimension_px
         .max(320);
+
+    current.observability.prometheus_enabled = setup.observability.prometheus_enabled;
+    current.observability.prometheus_port = setup.observability.prometheus_port;
+    current.security.audit.enabled = setup.audit.enabled;
+    current.security.audit.record_arguments = setup.audit.record_arguments;
 
     ensure_desktop_automation_capabilities(&mut current);
     current.validate_or_bail().map_err(|e| e.to_string())?;

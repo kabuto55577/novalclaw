@@ -1,5 +1,6 @@
 use crate::agent::history::sanitize_messages_for_provider;
 use crate::providers::{ChatMessage, ChatRequest, Provider, ToolCall};
+use crate::security::SecurityContext;
 use crate::tools::{Tool, ToolSpec};
 use anyhow::Result;
 
@@ -10,6 +11,7 @@ pub struct AgentDispatcher<'a> {
     tools: &'a [Box<dyn Tool>],
     tool_specs: &'a [ToolSpec],
     max_tool_iterations: usize,
+    security: &'a SecurityContext,
 }
 
 impl<'a> AgentDispatcher<'a> {
@@ -18,12 +20,14 @@ impl<'a> AgentDispatcher<'a> {
         tools: &'a [Box<dyn Tool>],
         tool_specs: &'a [ToolSpec],
         max_tool_iterations: usize,
+        security: &'a SecurityContext,
     ) -> Self {
         Self {
             provider,
             tools,
             tool_specs,
             max_tool_iterations,
+            security,
         }
     }
 
@@ -32,8 +36,16 @@ impl<'a> AgentDispatcher<'a> {
         *messages = sanitize_messages_for_provider(std::mem::take(messages));
         let iteration_cap = self.max_tool_iterations.max(1);
 
-        for _ in 0..iteration_cap {
-            let response = self
+        for iteration in 0..iteration_cap {
+            let provider_name = self
+                .security
+                .audit()
+                .context()
+                .provider
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+
+            let chat_result = self
                 .provider
                 .chat(ChatRequest {
                     messages,
@@ -43,7 +55,29 @@ impl<'a> AgentDispatcher<'a> {
                         Some(self.tool_specs)
                     },
                 })
-                .await?;
+                .await;
+
+            match &chat_result {
+                Ok(response) => {
+                    crate::observability::record_provider_call(&provider_name, "ok");
+                    self.security
+                        .audit_provider_call(
+                            iteration,
+                            response.tool_calls.len(),
+                            true,
+                            "provider returned response",
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    crate::observability::record_provider_call(&provider_name, "error");
+                    self.security
+                        .audit_provider_call(iteration, 0, false, &err.to_string())
+                        .await;
+                }
+            }
+
+            let response = chat_result?;
 
             if response.tool_calls.is_empty() {
                 let text = response.text.unwrap_or_default();
@@ -82,14 +116,43 @@ impl<'a> AgentDispatcher<'a> {
 
         let args: serde_json::Value = serde_json::from_str(&tool_call.arguments)
             .map_err(|e| anyhow::anyhow!("Invalid tool arguments JSON: {e}"))?;
-        let result = tool.execute(args).await?;
 
-        if result.success {
-            Ok(result.output)
-        } else {
-            Ok(result
-                .error
-                .unwrap_or_else(|| "tool execution failed".to_string()))
+        match self
+            .security
+            .gate_tool_execution(tool_call.name.as_str(), &args)
+            .await?
+        {
+            crate::security::ToolExecutionGate::Blocked { reason } => {
+                return Ok(format!("tool blocked by security policy: {reason}"));
+            }
+            crate::security::ToolExecutionGate::ApprovalRequired { pending } => {
+                return Ok(format!(
+                    "tool execution requires approval (id={}, tool={}, reason={}). \
+                     Approve with: omninova approvals approve {}",
+                    pending.id, pending.tool_name, pending.reason, pending.id
+                ));
+            }
+            crate::security::ToolExecutionGate::Proceed { .. } => {}
         }
+
+        let result = tool.execute(args.clone()).await?;
+        let success = result.success;
+        let output = if success {
+            result.output
+        } else {
+            result
+                .error
+                .clone()
+                .unwrap_or_else(|| "tool execution failed".to_string())
+        };
+        self.security
+            .audit_tool_call(
+                tool_call.name.as_str(),
+                &args,
+                success,
+                if success { "ok" } else { output.as_str() },
+            )
+            .await;
+        Ok(output)
     }
 }

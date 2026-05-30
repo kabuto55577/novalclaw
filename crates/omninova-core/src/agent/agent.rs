@@ -3,6 +3,7 @@ use crate::agent::dispatcher::AgentDispatcher;
 use crate::agent::prompt::bootstrap_system_messages;
 use crate::memory::{Memory, MemoryCategory};
 use crate::providers::{ChatMessage, Provider};
+use crate::security::SecurityContext;
 use crate::tools::{Tool, ToolSpec};
 use anyhow::Result;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub struct Agent {
     tool_specs: Vec<ToolSpec>,
     memory: Arc<dyn Memory>,
     config: AgentConfig,
+    security: SecurityContext,
     messages: Vec<ChatMessage>,
 }
 
@@ -22,6 +24,7 @@ impl Agent {
         tools: Vec<Box<dyn Tool>>,
         memory: Arc<dyn Memory>,
         config: AgentConfig,
+        security: SecurityContext,
     ) -> Self {
         let tool_specs = tools.iter().map(|t| t.spec()).collect();
         Self {
@@ -30,6 +33,7 @@ impl Agent {
             tool_specs,
             memory,
             config,
+            security,
             messages: Vec::new(),
         }
     }
@@ -68,6 +72,7 @@ impl Agent {
             &self.tools,
             &self.tool_specs,
             self.config.max_tool_iterations,
+            &self.security,
         );
         dispatcher.run(&mut self.messages).await
     }

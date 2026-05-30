@@ -36,7 +36,17 @@ pub fn build_audit_report(config: &Config) -> serde_json::Value {
             "estop_enabled": config.security.estop.enabled,
             "audit_log_enabled": config.security.audit.enabled,
             "sandbox_enabled": config.security.sandbox.enabled,
+            "tool_policy_enabled": config.security.tool_policy.enabled,
             "syscall_anomaly_enabled": config.security.syscall_anomaly.enabled,
+        },
+        "observability": {
+            "prometheus_enabled": config.observability.prometheus_enabled,
+            "tracing_enabled": config.observability.tracing_enabled,
+        },
+        "approvals": {
+            "enabled": config.approvals.enabled,
+            "auto_approve": config.approvals.auto_approve,
+            "require_approval": config.approvals.require_approval,
         },
         "autonomy": {
             "level": config.autonomy.level,
@@ -58,6 +68,15 @@ pub fn build_status_report(config: &Config) -> serde_json::Value {
             "estop_enabled": config.security.estop.enabled,
             "audit_log_enabled": config.security.audit.enabled,
             "sandbox_enabled": config.security.sandbox.enabled,
+            "tool_policy_enabled": config.security.tool_policy.enabled,
+        },
+        "approvals": {
+            "enabled": config.approvals.enabled,
+            "auto_approve": config.approvals.auto_approve,
+            "require_approval": config.approvals.require_approval,
+        },
+        "observability": {
+            "prometheus_enabled": config.observability.prometheus_enabled,
         },
         "penetration_assessment_workflow": workflow_phases_value(),
         "report_template_markdown": REPORT_TEMPLATE_MD,

@@ -250,6 +250,16 @@ export interface MultimodalConfig {
   desktop_vision_max_dimension_px?: number;
 }
 
+export interface ObservabilityConfig {
+  prometheus_enabled?: boolean;
+  prometheus_port?: number;
+}
+
+export interface AuditConfig {
+  enabled?: boolean;
+  record_arguments?: boolean;
+}
+
 // Main configuration interface
 export interface Config {
   api_key?: string;
@@ -267,6 +277,8 @@ export interface Config {
   skills?: SkillsConfig;
   agent?: AgentPersonaConfig;
   multimodal?: MultimodalConfig;
+  observability?: ObservabilityConfig;
+  audit?: AuditConfig;
 }
 
 export interface GatewayStatus {

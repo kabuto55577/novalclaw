@@ -1,7 +1,8 @@
 pub mod pairing;
 pub mod ws;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -15,7 +16,10 @@ use crate::memory::{Memory, factory::build_memory_from_config};
 use crate::providers::ChatMessage;
 use crate::providers::{ProviderSelection, build_provider_from_config, build_provider_with_selection};
 use crate::routing::{RouteDecision, resolve_agent_route};
-use crate::security::{EstopController, EstopState, resolve_shell_allowlist};
+use crate::security::{
+    ApprovalController, EstopController, EstopState, PendingApproval, SecurityContext,
+    is_tool_globally_allowed, resolve_shell_allowlist,
+};
 use crate::skills::{format_skills_prompt, load_skills_from_dir};
 use crate::tools::{
     BrowserTool, ContentSearchTool, FileEditTool, FileReadTool, FileWriteTool, GitOperationsTool,
@@ -33,7 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 static SESSION_LOCK_WAIT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static SESSION_LOCK_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -133,7 +137,8 @@ impl GatewayRuntime {
             }
         }
 
-        let mut agent = Agent::new(provider, tools, self.memory.clone(), agent_cfg);
+        let security = SecurityContext::from_config(&cfg);
+        let mut agent = Agent::new(provider, tools, self.memory.clone(), agent_cfg, security);
         agent.process_message(message).await
     }
 
@@ -143,16 +148,31 @@ impl GatewayRuntime {
     }
 
     pub async fn process_inbound(&self, inbound: &InboundMessage) -> anyhow::Result<GatewayInboundResponse> {
+        let started = std::time::Instant::now();
         self.ensure_not_stopped().await?;
+        let cfg = self.config.read().await.clone();
+        let route = resolve_agent_route(&cfg, inbound);
+        let security = SecurityContext::for_inbound(&cfg, inbound, &route);
+        let channel_label = security.audit().context().channel.clone();
+        crate::observability::record_inbound_request(&channel_label);
+        security
+            .audit_inbound_start(inbound.text.chars().count())
+            .await;
+
         let mut steps = vec![ExecutionStep::done(
             "接收请求",
-            format!("channel={:?}, session={}", inbound.channel, inbound.session_id.as_deref().unwrap_or("-")),
+            format!(
+                "channel={:?}, session={}, trace={}",
+                inbound.channel,
+                inbound.session_id.as_deref().unwrap_or("-"),
+                security.trace_id()
+            ),
         )];
-        let cfg = self.config.read().await.clone();
+
+        let result = (async {
         let _slot = acquire_inbound_slot(&cfg, &self.active_inbound)?;
         let _child_slot =
             acquire_subagent_guard(&cfg, inbound, &self.active_children_by_parent).await?;
-        let route = resolve_agent_route(&cfg, inbound);
         steps.push(ExecutionStep::done(
             "路由选择",
             format!(
@@ -162,6 +182,12 @@ impl GatewayRuntime {
                 route.model.as_ref().map(|m| format!(", Model: {m}")).unwrap_or_default()
             ),
         ));
+        security
+            .audit_route(&format!(
+                "agent={} provider={:?} model={:?}",
+                route.agent_name, route.provider, route.model
+            ))
+            .await;
         let lineage = self
             .validate_and_resolve_session_lineage(&cfg, inbound, &route.agent_name)
             .await?;
@@ -212,7 +238,14 @@ impl GatewayRuntime {
             }
         }
 
-        let mut agent = Agent::new(provider, tools, self.memory.clone(), agent_cfg.clone());
+        let agent_security = security.clone();
+        let mut agent = Agent::new(
+            provider,
+            tools,
+            self.memory.clone(),
+            agent_cfg.clone(),
+            agent_security,
+        );
         if let Some(session_id) = inbound.session_id.as_deref() {
             let _guard = self.session_store_guard.lock().await;
             match load_session_history(&cfg, &inbound.channel, session_id).await {
@@ -283,10 +316,41 @@ impl GatewayRuntime {
                 steps.push(ExecutionStep::error("保存会话历史", e.to_string()));
                 warn!("failed to save session history for {}: {}", session_id, e);
             } else {
+                let count = agent.export_messages().len();
+                security
+                    .audit_session_persisted(session_id, count)
+                    .await;
                 steps.push(ExecutionStep::done("保存会话历史", session_id.to_string()));
             }
         }
         Ok(GatewayInboundResponse { route, reply, steps })
+        })
+        .await;
+
+        match &result {
+            Ok(resp) => {
+                security
+                    .audit_inbound_complete(true, &format!("reply_len={}", resp.reply.len()))
+                    .await;
+                crate::observability::record_inbound_duration(
+                    &channel_label,
+                    "ok",
+                    started.elapsed().as_secs_f64(),
+                );
+            }
+            Err(err) => {
+                crate::observability::record_inbound_error("process_inbound");
+                security
+                    .audit_inbound_complete(false, &err.to_string())
+                    .await;
+                crate::observability::record_inbound_duration(
+                    &channel_label,
+                    "error",
+                    started.elapsed().as_secs_f64(),
+                );
+            }
+        }
+        result
     }
 
     async fn validate_and_resolve_session_lineage(
@@ -459,6 +523,7 @@ impl GatewayRuntime {
         reason: Option<String>,
     ) -> anyhow::Result<EstopState> {
         let cfg = self.config.read().await.clone();
+        crate::observability::record_estop_event("pause");
         EstopController::from_config(&cfg)
             .pause(level, domain, tool, reason)
             .await
@@ -466,7 +531,39 @@ impl GatewayRuntime {
 
     pub async fn estop_resume(&self) -> anyhow::Result<EstopState> {
         let cfg = self.config.read().await.clone();
+        crate::observability::record_estop_event("resume");
         EstopController::from_config(&cfg).resume().await
+    }
+
+    pub async fn list_approvals(&self, pending_only: bool) -> anyhow::Result<Vec<PendingApproval>> {
+        let cfg = self.config.read().await.clone();
+        ApprovalController::from_workspace(&cfg.workspace_dir)
+            .list(pending_only)
+            .await
+    }
+
+    pub async fn approve_request(
+        &self,
+        id: &str,
+        approved_by: Option<String>,
+    ) -> anyhow::Result<PendingApproval> {
+        let cfg = self.config.read().await.clone();
+        crate::observability::record_approval_event("approved");
+        ApprovalController::from_workspace(&cfg.workspace_dir)
+            .approve(id, approved_by)
+            .await
+    }
+
+    pub async fn reject_request(
+        &self,
+        id: &str,
+        reason: Option<String>,
+    ) -> anyhow::Result<PendingApproval> {
+        let cfg = self.config.read().await.clone();
+        crate::observability::record_approval_event("rejected");
+        ApprovalController::from_workspace(&cfg.workspace_dir)
+            .reject(id, reason)
+            .await
     }
 
     pub async fn session_tree_snapshot(&self) -> anyhow::Result<GatewaySessionTreeResponse> {
@@ -703,6 +800,9 @@ impl GatewayRuntime {
             .route("/estop/status", get(http_estop_status))
             .route("/estop/pause", post(http_estop_pause))
             .route("/estop/resume", post(http_estop_resume))
+            .route("/approvals", get(http_approvals_list))
+            .route("/approvals/{id}/approve", post(http_approvals_approve))
+            .route("/approvals/{id}/reject", post(http_approvals_reject))
             .route("/config", get(http_get_config).post(http_set_config))
             .route("/api/status", get(http_api_status))
             .route("/api/tools", get(http_api_tools))
@@ -712,6 +812,31 @@ impl GatewayRuntime {
             .route("/metrics", get(http_metrics))
             .route("/ws/chat", get(ws::ws_chat_handler))
             .with_state(self);
+
+        if cfg.observability.prometheus_enabled {
+            let metrics_port = cfg.observability.prometheus_port.unwrap_or(9090);
+            let metrics_addr: SocketAddr = format!("{}:{}", cfg.gateway.host, metrics_port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid prometheus bind address: {e}"))?;
+            let metrics_app = Router::new().route("/metrics", get(http_metrics_standalone));
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(metrics_addr).await {
+                    Ok(listener) => {
+                        info!(
+                            "prometheus metrics listening on http://{}/metrics",
+                            metrics_addr
+                        );
+                        if let Err(e) = axum::serve(listener, metrics_app).await {
+                            warn!("prometheus metrics server stopped: {e}");
+                        }
+                    }
+                    Err(e) => warn!(
+                        "failed to bind prometheus metrics on {}: {e}",
+                        metrics_addr
+                    ),
+                }
+            });
+        }
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
@@ -1174,6 +1299,17 @@ pub struct GatewayEstopPauseRequest {
     pub domain: Option<String>,
     pub tool: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct GatewayApprovalActionRequest {
+    pub approved_by: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct GatewayApprovalsQuery {
+    pub pending_only: Option<bool>,
 }
 
 async fn http_root() -> Json<serde_json::Value> {
@@ -2056,6 +2192,44 @@ async fn http_estop_resume(
     }
 }
 
+async fn http_approvals_list(
+    State(runtime): State<GatewayRuntime>,
+    Query(query): Query<GatewayApprovalsQuery>,
+) -> Result<Json<Vec<PendingApproval>>, Json<GatewayError>> {
+    match runtime.list_approvals(query.pending_only.unwrap_or(true)).await {
+        Ok(items) => Ok(Json(items)),
+        Err(e) => Err(Json(GatewayError {
+            message: e.to_string(),
+        })),
+    }
+}
+
+async fn http_approvals_approve(
+    State(runtime): State<GatewayRuntime>,
+    Path(id): Path<String>,
+    Json(req): Json<GatewayApprovalActionRequest>,
+) -> Result<Json<PendingApproval>, Json<GatewayError>> {
+    match runtime.approve_request(&id, req.approved_by).await {
+        Ok(item) => Ok(Json(item)),
+        Err(e) => Err(Json(GatewayError {
+            message: e.to_string(),
+        })),
+    }
+}
+
+async fn http_approvals_reject(
+    State(runtime): State<GatewayRuntime>,
+    Path(id): Path<String>,
+    Json(req): Json<GatewayApprovalActionRequest>,
+) -> Result<Json<PendingApproval>, Json<GatewayError>> {
+    match runtime.reject_request(&id, req.reason).await {
+        Ok(item) => Ok(Json(item)),
+        Err(e) => Err(Json(GatewayError {
+            message: e.to_string(),
+        })),
+    }
+}
+
 async fn http_api_status(
     State(runtime): State<GatewayRuntime>,
 ) -> Result<Json<serde_json::Value>, Json<GatewayError>> {
@@ -2277,8 +2451,18 @@ async fn http_api_cron_add(
     Ok(Json(serde_json::json!({ "ok": true, "id": id })))
 }
 
-async fn http_metrics() -> String {
-    crate::observability::encode_metrics()
+async fn http_metrics(
+    State(runtime): State<GatewayRuntime>,
+) -> Result<(StatusCode, String), StatusCode> {
+    let cfg = runtime.get_config().await;
+    if !cfg.observability.prometheus_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok((StatusCode::OK, crate::observability::encode_metrics()))
+}
+
+async fn http_metrics_standalone() -> (StatusCode, String) {
+    (StatusCode::OK, crate::observability::encode_metrics())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2296,7 +2480,12 @@ pub fn create_default_tools(config: &Config) -> Vec<Box<dyn Tool>> {
         Box::new(GlobSearchTool::new(workspace.clone())),
         Box::new(ContentSearchTool::new(workspace.clone())),
         Box::new(GitOperationsTool::new(workspace.clone())),
-        Box::new(ShellTool::new(workspace.clone(), shell_allowlist, Some(30))),
+        Box::new(ShellTool::new(
+            workspace.clone(),
+            shell_allowlist,
+            Some(30),
+            config.clone(),
+        )),
         Box::new(PdfReadTool::new(workspace)),
     ]
 }
@@ -2335,6 +2524,9 @@ pub fn create_all_tools(config: &Config, memory: Arc<dyn Memory>) -> Vec<Box<dyn
     tools.push(Box::new(MemoryRecallTool::new(memory)));
 
     tools
+        .into_iter()
+        .filter(|tool| is_tool_globally_allowed(config, tool.name()))
+        .collect()
 }
 
 fn create_tools_for_route(

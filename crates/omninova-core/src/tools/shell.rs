@@ -1,3 +1,5 @@
+use crate::config::Config;
+use crate::security::sandbox::{ensure_sandbox_home, sandbox_env, sandbox_enabled};
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
@@ -13,6 +15,7 @@ pub struct ShellTool {
     workspace_dir: PathBuf,
     allowed_commands: Vec<String>,
     timeout_secs: u64,
+    config: Config,
 }
 
 impl ShellTool {
@@ -20,11 +23,13 @@ impl ShellTool {
         workspace_dir: impl Into<PathBuf>,
         allowed_commands: Vec<String>,
         timeout_secs: Option<u64>,
+        config: Config,
     ) -> Self {
         Self {
             workspace_dir: workspace_dir.into(),
             allowed_commands,
             timeout_secs: timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1),
+            config,
         }
     }
 
@@ -125,6 +130,16 @@ impl Tool for ShellTool {
             }
         };
 
+        if sandbox_enabled(&self.config) {
+            if let Err(e) = ensure_sandbox_home(&self.config).await {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("sandbox init failed: {e}")),
+                });
+            }
+        }
+
         let mut child = Command::new("sh");
         child
             .arg("-lc")
@@ -133,6 +148,13 @@ impl Tool for ShellTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if sandbox_enabled(&self.config) && self.config.security.sandbox.strip_environment {
+            child.env_clear();
+            for (key, value) in sandbox_env(&self.config) {
+                child.env(key, value);
+            }
+        }
 
         let output = match timeout(Duration::from_secs(timeout_secs), child.output()).await {
             Ok(exec_result) => match exec_result {

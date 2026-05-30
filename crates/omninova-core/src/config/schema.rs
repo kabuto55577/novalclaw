@@ -576,6 +576,8 @@ pub struct SecurityConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default)]
+    pub tool_policy: ToolPolicyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -620,16 +622,66 @@ pub struct SyscallAnomalyConfig {
     pub alert_on_unknown_syscall: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub workspace_jail: bool,
+    #[serde(default = "default_true")]
+    pub strip_environment: bool,
+    #[serde(default)]
+    pub allowed_env_vars: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            workspace_jail: true,
+            strip_environment: true,
+            allowed_env_vars: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditConfig {
     #[serde(default)]
     pub enabled: bool,
+    pub log_file: Option<String>,
+    #[serde(default)]
+    pub record_arguments: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            log_file: None,
+            record_arguments: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolPolicyConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+}
+
+impl Default for ToolPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1930,16 +1982,37 @@ pub struct SessionConfig {
     pub max_concurrent: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalsConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     pub mode: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_auto_approve")]
     pub auto_approve: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_require_approval_tools")]
     pub require_approval: Vec<String>,
+}
+
+fn default_require_approval_tools() -> Vec<String> {
+    vec![
+        "shell".into(),
+        "file_write".into(),
+        "file_edit".into(),
+        "git_operations".into(),
+        "browser".into(),
+        "http_request".into(),
+    ]
+}
+
+impl Default for ApprovalsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: Some("supervised".into()),
+            auto_approve: default_auto_approve(),
+            require_approval: default_require_approval_tools(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

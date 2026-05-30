@@ -171,6 +171,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: EstopCommands,
     },
+    /// Approve or reject pending tool execution requests.
+    Approvals {
+        #[command(subcommand)]
+        command: ApprovalsCommands,
+    },
     /// Manage background gateway service.
     Daemon {
         #[command(subcommand)]
@@ -425,6 +430,27 @@ pub enum SessionCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ApprovalsCommands {
+    /// List approval requests.
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Approve a pending tool execution request.
+    Approve {
+        id: String,
+        #[arg(long)]
+        approved_by: Option<String>,
+    },
+    /// Reject a pending tool execution request.
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum EstopCommands {
     Status,
     Pause {
@@ -662,6 +688,7 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 EstopCommands::Resume => Ok(serde_json::to_string_pretty(&runtime.estop_resume().await?)?),
             }
         }
+        Commands::Approvals { command } => run_approvals(command, &config).await,
         Commands::Daemon { command } => run_daemon(command, &config).await,
         Commands::Skills { command } => run_skills(command.as_ref(), &config).await,
         Commands::Browser { command } => match command {
@@ -954,6 +981,24 @@ async fn run_secrets(cmd: &SecretsCommands, _config: &Config) -> Result<String> 
     match cmd {
         SecretsCommands::List => Ok("[]".to_string()),
         SecretsCommands::Reload => Ok("secrets reload not yet implemented".to_string()),
+    }
+}
+
+async fn run_approvals(cmd: &ApprovalsCommands, config: &Config) -> Result<String> {
+    let runtime = GatewayRuntime::new(config.clone());
+    match cmd {
+        ApprovalsCommands::List { all } => {
+            let items = runtime.list_approvals(!all).await?;
+            Ok(serde_json::to_string_pretty(&items)?)
+        }
+        ApprovalsCommands::Approve { id, approved_by } => {
+            let item = runtime.approve_request(id, approved_by.clone()).await?;
+            Ok(serde_json::to_string_pretty(&item)?)
+        }
+        ApprovalsCommands::Reject { id, reason } => {
+            let item = runtime.reject_request(id, reason.clone()).await?;
+            Ok(serde_json::to_string_pretty(&item)?)
+        }
     }
 }
 

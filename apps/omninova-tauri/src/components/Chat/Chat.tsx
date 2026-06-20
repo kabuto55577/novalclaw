@@ -242,6 +242,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>(
     initialStorage.messagesBySession
   );
+  // 已删除会话墓碑：防止网关同步把删掉的会话重新合并回列表。
+  const [deletedSessionIds, setDeletedSessionIds] = useState<string[]>(
+    initialStorage.deletedSessionIds ?? []
+  );
   const [historyLoading, setHistoryLoading] = useState(false);
   // 输入草稿与运行状态按会话隔离，避免一个会话影响其它会话。
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -335,7 +339,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
 
   const syncChatSessions = useCallback(async () => {
     try {
-      const remote = await fetchWebSessionsFromGateway();
+      const remoteAll = await fetchWebSessionsFromGateway();
+      // 过滤掉已被用户删除的会话，避免「删了又回来」。
+      const tombstoned = new Set(deletedSessionIds);
+      const remote = remoteAll.filter((s) => !tombstoned.has(s.sessionId));
       setAvatars((prev) => {
         const merged = mergeAvatarSessions(prev, remote);
         if (
@@ -355,15 +362,16 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     } catch {
       // 网关未就绪时仅使用本地会话列表
     }
-  }, []);
+  }, [deletedSessionIds]);
 
   useEffect(() => {
     saveChatStorage({
       avatars,
       activeAvatarId,
       messagesBySession,
+      deletedSessionIds,
     });
-  }, [avatars, activeAvatarId, messagesBySession]);
+  }, [avatars, activeAvatarId, messagesBySession, deletedSessionIds]);
 
   useEffect(() => {
     void refreshGatewayStatus();
@@ -460,6 +468,19 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       return next;
     });
 
+    // 记录墓碑并在网关侧删除，避免被会话同步重新合并回来。
+    const target = avatars.find((a) => a.id === id);
+    if (target) {
+      setDeletedSessionIds((prev) =>
+        prev.includes(target.sessionId) ? prev : [...prev, target.sessionId]
+      );
+      void invokeTauri<boolean>("delete_chat_session", {
+        query: { sessionId: target.sessionId, channel: "web" },
+      }).catch(() => {
+        // 网关未连接时忽略：墓碑已能阻止其在本地重新出现。
+      });
+    }
+
     const remaining = avatars.filter((a) => a.id !== id);
 
     const dropMaps = (alsoSeed?: string) => {
@@ -486,6 +507,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
       };
       setAvatars([fresh]);
       dropMaps(fresh.id);
+      // 重建的 Main 复用默认 sessionId，需从墓碑移除以恢复其同步。
+      setDeletedSessionIds((prev) =>
+        prev.filter((sid) => sid !== fresh.sessionId)
+      );
       setActiveAvatarId(fresh.id);
       return;
     }

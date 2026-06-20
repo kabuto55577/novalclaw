@@ -594,6 +594,33 @@ impl GatewayRuntime {
         }
     }
 
+    /// 删除某个会话：从内存血缘树与持久化会话存储中移除其记录。
+    /// 返回是否确有记录被删除。
+    pub async fn delete_session(
+        &self,
+        channel: &ChannelKind,
+        session_id: &str,
+    ) -> anyhow::Result<bool> {
+        let cfg = self.config.read().await.clone();
+        let key = session_key(channel, session_id);
+
+        // 内存血缘树
+        {
+            let mut tree = self.session_tree.write().await;
+            tree.remove(&key);
+        }
+
+        // 持久化存储
+        let path = session_store_path(&cfg);
+        let mut store = load_session_store(&path).await?;
+        let removed = store.sessions.remove(&key).is_some();
+        if removed {
+            let serialized = serde_json::to_string_pretty(&store)?;
+            atomic_write_string(&path, &serialized).await?;
+        }
+        Ok(removed)
+    }
+
     pub async fn session_tree_snapshot_filtered(
         &self,
         query: &GatewaySessionTreeQuery,

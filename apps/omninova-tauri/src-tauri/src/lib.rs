@@ -527,6 +527,22 @@ async fn get_chat_session_history(
 }
 
 #[tauri::command]
+async fn delete_chat_session(
+    query: UiSessionHistoryQuery,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<bool, String> {
+    let runtime = {
+        let app_state = state.lock().await;
+        app_state.runtime.clone()
+    };
+    let channel = query.channel.unwrap_or(ChannelKind::Web);
+    runtime
+        .delete_session(&channel, &query.session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn session_tree_snapshot(
     query: Option<GatewaySessionTreeQuery>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
@@ -1308,6 +1324,7 @@ pub fn run() {
             route_inbound_message,
             process_inbound_message,
             get_chat_session_history,
+            delete_chat_session,
             session_tree_snapshot,
             check_browser_dep,
             install_browser_dep,

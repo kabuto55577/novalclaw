@@ -60,7 +60,7 @@ export function formatTimeFromUnix(ts: number): string {
 export function sessionDisplayName(sessionId: string): string {
   if (sessionId === "omninova-chat-session") return "Main";
   const short = sessionId.replace(/^session-/, "").slice(0, 8);
-  return short ? `对话 ${short}` : sessionId.slice(0, 12);
+  return short ? `智能体 ${short}` : sessionId.slice(0, 12);
 }
 
 export function loadChatStorage(): ChatStorageSnapshot {

@@ -436,7 +436,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const handleAddAvatar = () => {
     const id = `avatar-${Date.now()}`;
     const sessionId = `session-${id}`;
-    const name = `对话 ${avatars.length}`;
+    const name = `智能体 ${avatars.length}`;
     setAvatars((prev) => [
       { id, name, sessionId, lastAt: formatTime(new Date()) },
       ...prev,
@@ -924,10 +924,10 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
             className="chat-new-chat-pill"
             onClick={handleAddAvatar}
           >
-            + 新对话
+            + 新智能体
           </button>
           <section className="chat-sidebar-section">
-            <h3 className="chat-sidebar-heading">会话</h3>
+            <h3 className="chat-sidebar-heading">智能体</h3>
             <ul className="chat-avatar-list">
               {avatars.map((a) => (
                 <li
@@ -954,8 +954,8 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                   <button
                     type="button"
                     className="chat-avatar-delete"
-                    title="删除会话"
-                    aria-label={`删除会话 ${a.name}`}
+                    title="删除智能体"
+                    aria-label={`删除智能体 ${a.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleDeleteAvatar(a.id);
@@ -1075,7 +1075,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                 <img src={omninovalLogo} alt="" />
               </span>
               <span className="chat-target-pill-text">
-                当前对话对象：{activeSession?.name ?? "Main"}
+                当前智能体：{activeSession?.name ?? "Main"}
               </span>
             </div>
             <div className="chat-main-toolbar-actions">
@@ -1129,7 +1129,7 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
               <div className="chat-hero">
                 <h1 className="chat-hero-title">我能为你做些什么？</h1>
                 <p className="chat-hero-sub">
-                  与 {activeSession?.name ?? "Main"} 对话；历史记录会保存在网关并在下次打开时恢复。
+                  与智能体 {activeSession?.name ?? "Main"} 对话；历史记录会保存在网关并在下次打开时恢复。
                 </p>
                 <div className="chat-quick-pills">
                   {quickPrompts.map((q) => (

@@ -1639,6 +1639,8 @@
 .chat-avatar-row .chat-avatar-item {
   flex: 1;
   min-width: 0;
+  /* 给右侧常显的删除按钮预留空间，避免压住时间戳 */
+  padding-right: 30px;
 }
 
 .chat-avatar-delete {
@@ -1658,8 +1660,8 @@
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
+  /* 常显，但默认低调，悬停/选中时更明显 */
+  opacity: 0.5;
   transition: opacity var(--transition-fast), background var(--transition-fast),
     color var(--transition-fast);
 }
@@ -1667,7 +1669,6 @@
 .chat-avatar-row:hover .chat-avatar-delete,
 .chat-avatar-row.is-active .chat-avatar-delete {
   opacity: 1;
-  pointer-events: auto;
 }
 
 .chat-avatar-delete:hover {

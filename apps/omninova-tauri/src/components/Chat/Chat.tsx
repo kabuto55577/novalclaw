@@ -423,6 +423,29 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     scrollMessagesToEnd("auto");
   }, [messages, sending, activeSteps, elapsedSec, scrollMessagesToEnd]);
 
+  // 窗口缩放时保持距底部绝对距离不变，避免内容漂移
+  useEffect(() => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+
+    let prevScrollHeight = container.scrollHeight;
+    let prevScrollTop = container.scrollTop;
+
+    const ro = new ResizeObserver(() => {
+      const newScrollHeight = container.scrollHeight;
+      if (newScrollHeight === prevScrollHeight) return;
+
+      const distanceFromBottom = prevScrollHeight - prevScrollTop;
+      container.scrollTop = Math.max(0, newScrollHeight - distanceFromBottom);
+
+      prevScrollHeight = newScrollHeight;
+      prevScrollTop = container.scrollTop;
+    });
+
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, []);
+
   useEffect(() => {
     const timers = elapsedTimersRef.current;
     return () => {

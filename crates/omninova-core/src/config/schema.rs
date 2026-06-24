@@ -9,7 +9,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(skip)]
+    /// User-selected workspace root. Persisted to config.toml so that the
+    /// file/shell/git tools always use the same directory after a restart.
+    /// We still need to keep `config_path` skipped because it is a runtime
+    /// path computed from the actual on-disk location of the config file.
+    #[serde(default)]
     pub workspace_dir: PathBuf,
     #[serde(skip)]
     pub config_path: PathBuf,
@@ -750,8 +754,11 @@ impl Default for WasmRuntimeConfig {
             fuel_limit: default_fuel_limit(),
             memory_limit_mb: default_wasm_memory_mb(),
             max_module_size_mb: default_max_module_size_mb(),
-            allow_workspace_read: false,
-            allow_workspace_write: false,
+            // Wasm-side reads/writes are still bounded by `workspace_jail`,
+            // so defaulting to true lets in-workspace Wasm tools operate;
+            // the per-tool resolver remains the definitive jail check.
+            allow_workspace_read: true,
+            allow_workspace_write: true,
             allowed_hosts: Vec::new(),
             security: WasmSecurityConfig::default(),
         }

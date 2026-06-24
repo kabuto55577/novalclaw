@@ -22,8 +22,9 @@ use crate::security::{
 };
 use crate::skills::{format_skills_prompt, load_skills_from_dir};
 use crate::tools::{
-    BrowserTool, ContentSearchTool, FileEditTool, FileReadTool, FileWriteTool, GitOperationsTool,
-    GlobSearchTool, HttpRequestTool, MemoryRecallTool, MemoryStoreTool, PdfReadTool, ShellTool, Tool,
+    BrowserTool, ContentSearchTool, FileEditTool, FileListTool, FileReadTool, FileWriteTool,
+    GitOperationsTool, GlobSearchTool, HttpRequestTool, MemoryRecallTool, MemoryStoreTool,
+    PdfReadTool, ShellTool, Tool,
     WebFetchTool, WebSearchTool,
 };
 use crate::util::auth::verify_webhook_signature_with_policy_options;
@@ -223,6 +224,19 @@ impl GatewayRuntime {
             }
         }
         agent_cfg.max_tool_iterations = resolve_agent_max_tool_iterations(&cfg, &route.agent_name);
+
+        // Always tell the agent where its workspace lives so it can answer
+        // "where am I working?" and so the LLM has a single source of truth
+        // for absolute paths. Path /home or /workspace style guesses should
+        // never be used to answer that question.
+        {
+            let workspace_note = format!(
+                "\n[环境信息] 当前 Workspace 目录是：{}。回答“你当前 workspace 在哪里”这类问题时，必须直接引用本路径，不要尝试通过 shell 或 file_read 探测 /workspace、/home、~ 等路径。\n",
+                cfg.workspace_dir.display()
+            );
+            let current = agent_cfg.system_prompt.unwrap_or_default();
+            agent_cfg.system_prompt = Some(format!("{current}{workspace_note}"));
+        }
 
         if cfg.skills.open_skills_enabled {
             let skills_dir = cfg.skills.open_skills_dir.as_ref()
@@ -2504,6 +2518,7 @@ pub fn create_default_tools(config: &Config) -> Vec<Box<dyn Tool>> {
         Box::new(FileReadTool::new(workspace.clone())),
         Box::new(FileWriteTool::new(workspace.clone())),
         Box::new(FileEditTool::new(workspace.clone())),
+        Box::new(FileListTool::new(workspace.clone())),
         Box::new(GlobSearchTool::new(workspace.clone())),
         Box::new(ContentSearchTool::new(workspace.clone())),
         Box::new(GitOperationsTool::new(workspace.clone())),

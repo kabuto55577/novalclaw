@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { ChatMediaInteraction } from "./ChatMediaInteraction";
 import { invokeTauri } from "../../utils/tauri";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   isTauriEnvironment,
   pickComposerAttachmentPaths,
@@ -25,6 +26,7 @@ import type {
   ProviderHealthSummary,
   ExecutionStep,
   RouteDecision,
+  WorkspaceStatus,
 } from "../../types/config";
 
 const GATEWAY_STATUS_POLL_MS = 8000;
@@ -267,6 +269,8 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [desktopVisionMaster, setDesktopVisionMaster] = useState(false);
   const [desktopVisionOn, setDesktopVisionOn] = useState(false);
   const [desktopVisionMaxPx, setDesktopVisionMaxPx] = useState(1280);
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
+  const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatus | null>(null);
 
   const activeSession = avatars.find((a) => a.id === activeAvatarId);
   const sessionId = activeSession?.sessionId ?? "omninova-chat-session";
@@ -396,6 +400,8 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
         const maxPx = cfg.multimodal?.desktop_vision_max_dimension_px ?? 1280;
         setDesktopVisionMaster(master);
         setDesktopVisionMaxPx(maxPx);
+        setWorkspaceDir(cfg.workspace_dir ?? null);
+        setWorkspaceStatus(cfg.workspace_status ?? null);
         const stored = localStorage.getItem(DESKTOP_VISION_SESSION_KEY);
         if (stored === "1") setDesktopVisionOn(true);
         else if (stored === "0") setDesktopVisionOn(false);
@@ -419,31 +425,84 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   }, []);
 
   useEffect(() => {
-    if (!stickToBottomRef.current && !sending) return;
+    if (!stickToBottomRef.current) return;
     scrollMessagesToEnd("auto");
   }, [messages, sending, activeSteps, elapsedSec, scrollMessagesToEnd]);
 
-  // 窗口缩放时保持距底部绝对距离不变，避免内容漂移
+  // 窗口缩放导致消息重新换行时，保持视口顶部正在浏览的消息位置不变。
   useEffect(() => {
     const container = messagesScrollRef.current;
     if (!container) return;
 
-    let prevScrollHeight = container.scrollHeight;
-    let prevScrollTop = container.scrollTop;
+    type ScrollAnchor = {
+      element: HTMLElement;
+      offsetTop: number;
+    };
+
+    let anchor: ScrollAnchor | null = null;
+    let adjusting = false;
+
+    const captureAnchor = () => {
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (distanceFromBottom < 80) {
+        anchor = null;
+        return;
+      }
+
+      const containerTop = container.getBoundingClientRect().top;
+      const bubbles = container.querySelectorAll<HTMLElement>(".chat-bubble");
+      let firstVisible: HTMLElement | null = null;
+      let low = 0;
+      let high = bubbles.length - 1;
+
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const bubble = bubbles.item(middle);
+        if (bubble.getBoundingClientRect().bottom > containerTop) {
+          firstVisible = bubble;
+          high = middle - 1;
+        } else {
+          low = middle + 1;
+        }
+      }
+
+      anchor = firstVisible
+        ? {
+            element: firstVisible,
+            offsetTop: firstVisible.getBoundingClientRect().top - containerTop,
+          }
+        : null;
+    };
+
+    const handleScroll = () => {
+      if (!adjusting) captureAnchor();
+    };
+
+    captureAnchor();
+    container.addEventListener("scroll", handleScroll, { passive: true });
 
     const ro = new ResizeObserver(() => {
-      const newScrollHeight = container.scrollHeight;
-      if (newScrollHeight === prevScrollHeight) return;
+      adjusting = true;
 
-      const distanceFromBottom = prevScrollHeight - prevScrollTop;
-      container.scrollTop = Math.max(0, newScrollHeight - distanceFromBottom);
+      if (stickToBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      } else if (anchor?.element.isConnected) {
+        const currentOffsetTop =
+          anchor.element.getBoundingClientRect().top -
+          container.getBoundingClientRect().top;
+        container.scrollTop += currentOffsetTop - anchor.offsetTop;
+      }
 
-      prevScrollHeight = newScrollHeight;
-      prevScrollTop = container.scrollTop;
+      captureAnchor();
+      adjusting = false;
     });
 
     ro.observe(container);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      container.removeEventListener("scroll", handleScroll);
+    };
   }, []);
 
   useEffect(() => {
@@ -886,6 +945,55 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     }
   }, [mergePathsIntoInput]);
 
+  /**
+   * 工具按钮：选择 Agent Workspace 目录。
+   * - 调用现有的 save_setup_config 持久化，不新增重复保存逻辑。
+   * - 用户取消（open 返回 null）时不做任何变化。
+   * - 失败时复用 setError 通道显示提示。
+   */
+  const handleChooseWorkspace = useCallback(async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择 Agent Workspace 目录",
+      });
+      if (selected == null) return;
+      const dir = selected as string;
+      const current = await invokeTauri<Config>("get_setup_config").catch(() => null);
+      const next: Config = {
+        ...(current ?? ({} as Config)),
+        workspace_dir: dir,
+      };
+      const saveResult = await invokeTauri<{ gateway_restarted: boolean }>(
+        "save_setup_config",
+        { config: next }
+      );
+      setWorkspaceDir(dir);
+      if (saveResult?.gateway_restarted) {
+        // Refresh gateway status so the UI picks up the restarted gateway.
+        await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        const status = await invokeTauri<GatewayStatus>("gateway_status").catch(
+          () => null
+        );
+        if (status) {
+          setGatewayStatus(status.running ? "connected" : "disconnected");
+        }
+        // Re-fetch config to get the new workspace status.
+        const refreshed = await invokeTauri<Config>(
+          "get_setup_config"
+        ).catch(() => null);
+        if (refreshed) {
+          setWorkspaceStatus(refreshed.workspace_status ?? null);
+        }
+      }
+    } catch (err) {
+      setError(
+        `选择 Workspace 失败：${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }, []);
+
   const handleComposerDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1164,6 +1272,27 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
             </div>
           </div>
 
+          {workspaceStatus && workspaceStatus.state !== "ok" ? (
+            <div
+              className={`chat-workspace-banner chat-workspace-banner--${workspaceStatus.state}`}
+              role="status"
+            >
+              <strong>Workspace 未就绪：</strong>
+              {workspaceStatus.message}
+              {workspaceStatus.path ? (
+                <code className="chat-workspace-banner-path">{workspaceStatus.path}</code>
+              ) : null}
+              <button
+                type="button"
+                className="chat-workspace-banner-action"
+                onClick={() => void handleChooseWorkspace()}
+                disabled={sending}
+              >
+                {workspaceStatus.state === "unselected" ? "选择目录" : "重新选择"}
+              </button>
+            </div>
+          ) : null}
+
           <div
             ref={messagesScrollRef}
             className="chat-messages"
@@ -1236,6 +1365,20 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
             <ChatMediaInteraction
               appendTranscript={appendVoiceTranscript}
               disabled={sending || gatewayStatus !== "connected"}
+              trailingActions={
+                <button
+                  type="button"
+                  className={`chat-icon-btn chat-workspace-button${
+                    workspaceDir ? " is-active" : ""
+                  }`}
+                  title={workspaceDir ? `当前 Workspace：${workspaceDir}` : "设置 Workspace"}
+                  aria-label={workspaceDir ? `当前 Workspace：${workspaceDir}` : "设置 Workspace"}
+                  onClick={() => void handleChooseWorkspace()}
+                  disabled={sending}
+                >
+                  <span aria-hidden>📁</span>
+                </button>
+              }
             />
 
             <input

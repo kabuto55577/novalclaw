@@ -261,6 +261,12 @@ export interface AuditConfig {
 }
 
 // Main configuration interface
+export interface WorkspaceStatus {
+  state: "unselected" | "missing" | "inaccessible" | "ok";
+  path?: string | null;
+  message: string;
+}
+
 export interface Config {
   api_key?: string;
   api_url?: string;
@@ -268,6 +274,7 @@ export interface Config {
   default_model?: string;
   default_temperature?: number;
   workspace_dir?: string;
+  workspace_status?: WorkspaceStatus;
   omninoval_gateway_url?: string;
   omninoval_config_dir?: string;
   provider_api?: string;

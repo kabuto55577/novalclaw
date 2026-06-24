@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde::Deserializer;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Top-level Config
@@ -407,6 +407,35 @@ pub struct DelegateAgentConfig {
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     pub max_iterations: Option<usize>,
+    /// Per-agent workspace root. Takes precedence over the global
+    /// `Config::workspace_dir` when set. When empty the agent falls back
+    /// to the global workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_dir: Option<PathBuf>,
+}
+
+/// Resolve the effective workspace directory for an agent using the priority:
+///   1. `session_workspace_dir` (session-level override, e.g. from a one-off
+///      "use this folder" action in the UI)
+///   2. `agent_workspace_dir` (per-agent setting)
+///   3. `global_workspace_dir` (Config::workspace_dir)
+///   4. Return `None` when none of the above is set.
+pub fn resolve_effective_workspace_dir(
+    session_workspace_dir: Option<&Path>,
+    agent_workspace_dir: Option<&Path>,
+    global_workspace_dir: &Path,
+) -> Option<PathBuf> {
+    session_workspace_dir
+        .map(PathBuf::from)
+        .or_else(|| agent_workspace_dir.map(PathBuf::from))
+        .or_else(|| {
+            let g = global_workspace_dir;
+            if g.as_os_str().is_empty() || g.components().next().is_none() {
+                None
+            } else {
+                Some(g.to_path_buf())
+            }
+        })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -484,6 +513,7 @@ where
                         agentic: false,
                         allowed_tools: Vec::new(),
                         max_iterations: None,
+                        workspace_dir: None,
                     },
                 );
             }
@@ -2161,4 +2191,67 @@ pub struct SubagentsConfig {
     pub thinking: Option<String>,
     pub run_timeout_seconds: Option<u32>,
     pub announce_timeout_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_effective_workspace_dir_session_wins() {
+        let global = PathBuf::from("C:\\global");
+        let agent = PathBuf::from("C:\\agent");
+        let session = PathBuf::from("C:\\session");
+
+        let result = resolve_effective_workspace_dir(
+            Some(&session),
+            Some(&agent),
+            &global,
+        );
+        assert_eq!(result, Some(PathBuf::from("C:\\session")));
+    }
+
+    #[test]
+    fn resolve_effective_workspace_dir_agent_wins_over_global() {
+        let global = PathBuf::from("C:\\global");
+        let agent = PathBuf::from("C:\\agent");
+
+        let result = resolve_effective_workspace_dir(None, Some(&agent), &global);
+        assert_eq!(result, Some(PathBuf::from("C:\\agent")));
+    }
+
+    #[test]
+    fn resolve_effective_workspace_dir_falls_back_to_global() {
+        let global = PathBuf::from("C:\\global");
+
+        let result = resolve_effective_workspace_dir(None, None, &global);
+        assert_eq!(result, Some(PathBuf::from("C:\\global")));
+    }
+
+    #[test]
+    fn resolve_effective_workspace_dir_none_returns_none() {
+        let result = resolve_effective_workspace_dir(None, None, &PathBuf::new());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn delegate_agent_config_serde_with_workspace_dir() {
+        let toml = r#"
+provider = "openai"
+workspace_dir = "C:\\agent-workspace"
+"#;
+        let cfg: DelegateAgentConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.workspace_dir, Some(PathBuf::from("C:\\agent-workspace")));
+        assert_eq!(cfg.provider.as_deref(), Some("openai"));
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        assert!(serialized.contains("workspace_dir"));
+    }
+
+    #[test]
+    fn delegate_agent_config_workspace_dir_optional() {
+        let toml = "provider = \"openai\"";
+        let cfg: DelegateAgentConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.workspace_dir, None);
+    }
 }

@@ -19,6 +19,7 @@ import {
   type StoredChatMessage,
 } from "../../utils/chatStorage";
 import type {
+  AgentPersonaConfig,
   Config,
   GatewayHealth,
   GatewayInboundResponse,
@@ -271,6 +272,13 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   const [desktopVisionMaxPx, setDesktopVisionMaxPx] = useState(1280);
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
   const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatus | null>(null);
+  /**
+   * Session-level temporary workspace. Set by the chat-page Workspace button
+   * without modifying the agent's default workspace. This takes the highest
+   * priority when the Agent processes a message (higher than per-agent or
+   * global workspace_dir).
+   */
+  const [sessionWorkspaceDir, setSessionWorkspaceDir] = useState<string | null>(null);
 
   const activeSession = avatars.find((a) => a.id === activeAvatarId);
   const sessionId = activeSession?.sessionId ?? "omninova-chat-session";
@@ -400,7 +408,9 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
         const maxPx = cfg.multimodal?.desktop_vision_max_dimension_px ?? 1280;
         setDesktopVisionMaster(master);
         setDesktopVisionMaxPx(maxPx);
-        setWorkspaceDir(cfg.workspace_dir ?? null);
+        setWorkspaceDir(
+          cfg.agent?.workspace_dir ?? cfg.workspace_dir ?? null
+        );
         setWorkspaceStatus(cfg.workspace_status ?? null);
         const stored = localStorage.getItem(DESKTOP_VISION_SESSION_KEY);
         if (stored === "1") setDesktopVisionOn(true);
@@ -752,6 +762,9 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
     try {
       const metadata: Record<string, unknown> = {
         preferred_provider: selectedModel === "auto" ? undefined : selectedModel,
+        // Session-scoped temporary workspace (takes highest priority in the backend).
+        // Clears when the user closes the app or starts a new session.
+        ...(sessionWorkspaceDir ? { workspace_dir: sessionWorkspaceDir } : {}),
       };
 
       if (desktopVisionOn && desktopVisionMaster && isTauriEnvironment()) {
@@ -946,46 +959,54 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
   }, [mergePathsIntoInput]);
 
   /**
-   * 工具按钮：选择 Agent Workspace 目录。
-   * - 调用现有的 save_setup_config 持久化，不新增重复保存逻辑。
-   * - 用户取消（open 返回 null）时不做任何变化。
-   * - 失败时复用 setError 通道显示提示。
+   * Chat-page Workspace button — two modes:
+   * 1. Shift+click  → save to agent config (persistent, survives session)
+   * 2. plain click  → session-scoped temporary workspace (highest priority,
+   *                    resets on app restart / new chat session)
+   *
+   * Requirement #11: "聊天页点 Workspace 按钮选目录，只作为当前会话临时
+   * workspace，不要强制覆盖 Agent 默认 workspace，除非用户点击'保存到该 Agent'。"
    */
-  const handleChooseWorkspace = useCallback(async () => {
+  const handleChooseWorkspace = useCallback(async (event?: React.MouseEvent) => {
+    const saveToAgent = event?.shiftKey ?? false;
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "选择 Agent Workspace 目录",
+        title: saveToAgent ? "选择该 Agent 的 Workspace 目录" : "选择临时 Workspace 目录",
       });
       if (selected == null) return;
       const dir = selected as string;
-      const current = await invokeTauri<Config>("get_setup_config").catch(() => null);
-      const next: Config = {
-        ...(current ?? ({} as Config)),
-        workspace_dir: dir,
-      };
-      const saveResult = await invokeTauri<{ gateway_restarted: boolean }>(
-        "save_setup_config",
-        { config: next }
-      );
-      setWorkspaceDir(dir);
-      if (saveResult?.gateway_restarted) {
-        // Refresh gateway status so the UI picks up the restarted gateway.
-        await new Promise<void>((resolve) => setTimeout(resolve, 1000));
-        const status = await invokeTauri<GatewayStatus>("gateway_status").catch(
-          () => null
+
+      if (saveToAgent) {
+        // Save to the agent config (persistent).
+        const current = await invokeTauri<Config>("get_setup_config").catch(() => null);
+        const next: Config = {
+          ...(current ?? ({} as Config)),
+          agent: {
+            ...(current?.agent ?? {}),
+            workspace_dir: dir,
+          } as AgentPersonaConfig,
+        };
+        const saveResult = await invokeTauri<{ gateway_restarted: boolean }>(
+          "save_setup_config",
+          { config: next }
         );
-        if (status) {
-          setGatewayStatus(status.running ? "connected" : "disconnected");
+        setWorkspaceDir(dir);
+        if (saveResult?.gateway_restarted) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+          const status = await invokeTauri<GatewayStatus>("gateway_status").catch(() => null);
+          if (status) {
+            setGatewayStatus(status.running ? "connected" : "disconnected");
+          }
+          const refreshed = await invokeTauri<Config>("get_setup_config").catch(() => null);
+          if (refreshed) {
+            setWorkspaceStatus(refreshed.workspace_status ?? null);
+          }
         }
-        // Re-fetch config to get the new workspace status.
-        const refreshed = await invokeTauri<Config>(
-          "get_setup_config"
-        ).catch(() => null);
-        if (refreshed) {
-          setWorkspaceStatus(refreshed.workspace_status ?? null);
-        }
+      } else {
+        // Session-scoped temporary workspace (no save, no gateway restart).
+        setSessionWorkspaceDir(dir);
       }
     } catch (err) {
       setError(
@@ -1369,11 +1390,25 @@ export function Chat({ initialSidebarTab = "avatars" }: ChatProps) {
                 <button
                   type="button"
                   className={`chat-icon-btn chat-workspace-button${
-                    workspaceDir ? " is-active" : ""
+                    sessionWorkspaceDir || workspaceDir ? " is-active" : ""
                   }`}
-                  title={workspaceDir ? `当前 Workspace：${workspaceDir}` : "设置 Workspace"}
-                  aria-label={workspaceDir ? `当前 Workspace：${workspaceDir}` : "设置 Workspace"}
-                  onClick={() => void handleChooseWorkspace()}
+                  title={
+                    sessionWorkspaceDir
+                      ? `会话临时 Workspace：${sessionWorkspaceDir}\n（Shift+点击 保存到该 Agent）`
+                      : workspaceDir
+                        ? `Agent Workspace：${workspaceDir}\n（普通点击 = 临时会话，Shift+点击 = 保存到该 Agent）`
+                        : "设置 Workspace（Shift+点击 保存到该 Agent）"
+                  }
+                  aria-label={
+                    sessionWorkspaceDir
+                      ? `会话临时 Workspace：${sessionWorkspaceDir}`
+                      : workspaceDir
+                        ? `Agent Workspace：${workspaceDir}`
+                        : "设置 Workspace"
+                  }
+                  onClick={(e) =>
+                    void handleChooseWorkspace(e)
+                  }
                   disabled={sending}
                 >
                   <span aria-hidden>📁</span>

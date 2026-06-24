@@ -243,6 +243,8 @@ export interface AgentPersonaConfig {
   max_tool_iterations?: number;
   max_history_messages?: number;
   mbti_type?: string;
+  /** Per-agent workspace root. Takes precedence over the global Config.workspace_dir. */
+  workspace_dir?: string;
 }
 
 export interface MultimodalConfig {

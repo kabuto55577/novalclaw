@@ -11,7 +11,7 @@ use crate::channels::adapters::platform_webhook::{
 };
 use crate::channels::adapters::webhook::{WebhookInboundPayload, inbound_from_webhook};
 use crate::channels::{ChannelKind, InboundMessage};
-use crate::config::Config;
+use crate::config::{resolve_effective_workspace_dir, Config};
 use crate::memory::{Memory, factory::build_memory_from_config};
 use crate::providers::ChatMessage;
 use crate::providers::{ProviderSelection, build_provider_from_config, build_provider_with_selection};
@@ -121,7 +121,12 @@ impl GatewayRuntime {
         let cfg = self.config.read().await.clone();
         let route_agent_name = cfg.agent.name.clone();
         let provider = build_provider_from_config(&cfg);
-        let tools = create_tools_for_route(&cfg, &route_agent_name, self.memory.clone());
+        let tools = create_tools_for_route(
+            &cfg,
+            &route_agent_name,
+            self.memory.clone(),
+            &cfg.workspace_dir,
+        );
         let mut agent_cfg = cfg.agent.clone();
         agent_cfg.max_tool_iterations = resolve_agent_max_tool_iterations(&cfg, &route_agent_name);
 
@@ -189,6 +194,42 @@ impl GatewayRuntime {
                 route.agent_name, route.provider, route.model
             ))
             .await;
+
+        // Resolve effective workspace for this request.
+        // Priority: session metadata > per-agent workspace > global workspace.
+        let agent_delegate = cfg.agents.get(&route.agent_name);
+        let session_workspace_path: Option<std::path::PathBuf> = inbound
+            .metadata
+            .get("workspace_dir")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        let effective_workspace = resolve_effective_workspace_dir(
+            session_workspace_path.as_deref(),
+            agent_delegate.and_then(|d| d.workspace_dir.as_deref()),
+            &cfg.workspace_dir,
+        );
+        let effective_workspace = match effective_workspace {
+            Some(w) if !w.as_os_str().is_empty() => w,
+            _ => {
+                steps.push(ExecutionStep::error(
+                    "Workspace",
+                    "未设置 Workspace 目录，请点击 Workspace 按钮选择一个工作目录",
+                ));
+                cfg.workspace_dir.clone()
+            }
+        };
+        steps.push(ExecutionStep::done(
+            "Workspace",
+            format!("{}", effective_workspace.display()),
+        ));
+        security
+            .audit_route(&format!(
+                "agent={} workspace={}",
+                route.agent_name,
+                effective_workspace.display()
+            ))
+            .await;
         let lineage = self
             .validate_and_resolve_session_lineage(&cfg, inbound, &route.agent_name)
             .await?;
@@ -211,7 +252,12 @@ impl GatewayRuntime {
             model: route.model.clone(),
         };
         let provider = build_provider_with_selection(&cfg, &selection);
-        let tools = create_tools_for_route(&cfg, &route.agent_name, self.memory.clone());
+        let tools = create_tools_for_route(
+            &cfg,
+            &route.agent_name,
+            self.memory.clone(),
+            &effective_workspace,
+        );
         steps.push(ExecutionStep::done(
             "准备工具",
             format!("可用工具数：{}", tools.len()),
@@ -232,7 +278,7 @@ impl GatewayRuntime {
         {
             let workspace_note = format!(
                 "\n[环境信息] 当前 Workspace 目录是：{}。回答“你当前 workspace 在哪里”这类问题时，必须直接引用本路径，不要尝试通过 shell 或 file_read 探测 /workspace、/home、~ 等路径。\n",
-                cfg.workspace_dir.display()
+                effective_workspace.display()
             );
             let current = agent_cfg.system_prompt.unwrap_or_default();
             agent_cfg.system_prompt = Some(format!("{current}{workspace_note}"));
@@ -241,7 +287,7 @@ impl GatewayRuntime {
         if cfg.skills.open_skills_enabled {
             let skills_dir = cfg.skills.open_skills_dir.as_ref()
                 .map(PathBuf::from)
-                .unwrap_or_else(|| cfg.workspace_dir.join("skills"));
+                .unwrap_or_else(|| effective_workspace.join("skills"));
             if let Ok(skills) = load_skills_from_dir(&skills_dir) {
                 let prompt = format_skills_prompt(&skills);
                 if !prompt.is_empty() {
@@ -2512,7 +2558,15 @@ pub struct GatewayError {
 }
 
 pub fn create_default_tools(config: &Config) -> Vec<Box<dyn Tool>> {
-    let workspace = config.workspace_dir.clone();
+    create_workspace_tools(&config.workspace_dir, config)
+}
+
+/// Build all workspace-scoped tools with the given effective workspace root.
+pub fn create_workspace_tools(
+    effective_workspace: &PathBuf,
+    config: &Config,
+) -> Vec<Box<dyn Tool>> {
+    let workspace = effective_workspace.clone();
     let shell_allowlist = resolve_shell_allowlist(config);
     vec![
         Box::new(FileReadTool::new(workspace.clone())),
@@ -2574,9 +2628,10 @@ pub fn create_all_tools(config: &Config, memory: Arc<dyn Memory>) -> Vec<Box<dyn
 fn create_tools_for_route(
     config: &Config,
     route_agent_name: &str,
-    memory: Arc<dyn Memory>,
+    _memory: Arc<dyn Memory>,
+    effective_workspace: &PathBuf,
 ) -> Vec<Box<dyn Tool>> {
-    let tools = create_all_tools(config, memory);
+    let tools = create_workspace_tools(effective_workspace, config);
     let Some(delegate) = config.agents.get(route_agent_name) else {
         return tools;
     };
@@ -2624,10 +2679,11 @@ mod tests {
                 ..DelegateAgentConfig::default()
             },
         );
+        let effective_ws = PathBuf::from("/fake/workspace");
 
         let memory: Arc<dyn crate::memory::Memory> =
             Arc::new(crate::InMemoryMemory::new());
-        let tools = create_tools_for_route(&config, "researcher", memory);
+        let tools = create_tools_for_route(&config, "researcher", memory, &effective_ws);
         let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
         assert_eq!(names, vec!["file_read", "shell"]);
     }

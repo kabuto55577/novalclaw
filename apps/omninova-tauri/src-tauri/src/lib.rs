@@ -218,6 +218,21 @@ struct SetupAppConfig {
     observability: SetupObservabilityConfig,
     #[serde(default)]
     audit: SetupAuditConfig,
+    /// Per-agent settings (workspace_dir, system_prompt, etc.) from the Agent tab.
+    #[serde(default)]
+    agent: Option<AgentPersonaSetup>,
+}
+
+/// Corresponds to the frontend `AgentPersonaConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AgentPersonaSetup {
+    name: String,
+    workspace_dir: Option<String>,
+    system_prompt: Option<String>,
+    compact_context: Option<bool>,
+    max_tool_iterations: Option<usize>,
+    max_history_messages: Option<usize>,
+    mbti_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -912,6 +927,19 @@ fn setup_config_from_core(config: &Config) -> SetupAppConfig {
             enabled: config.security.audit.enabled,
             record_arguments: config.security.audit.record_arguments,
         },
+        agent: Some(AgentPersonaSetup {
+            name: config.agent.name.clone(),
+            workspace_dir: config
+                .agents
+                .get(&config.agent.name)
+                .and_then(|a| a.workspace_dir.clone())
+                .map(|p| p.to_string_lossy().to_string()),
+            system_prompt: config.agent.system_prompt.clone(),
+            compact_context: Some(config.agent.compact_context),
+            max_tool_iterations: Some(config.agent.max_tool_iterations),
+            max_history_messages: Some(config.agent.max_history_messages),
+            mbti_type: None,
+        }),
     }
 }
 
@@ -1057,6 +1085,25 @@ fn setup_config_to_core(
 
     if let Some(channels) = setup.channels {
         current.channels_config = channels_to_core(channels);
+    }
+
+    // Persist per-agent workspace_dir to the agents HashMap.
+    if let Some(agent_setup) = setup.agent {
+        current.agent.name = agent_setup.name.clone();
+        current.agent.system_prompt = agent_setup.system_prompt.clone();
+        current.agent.compact_context = agent_setup.compact_context.unwrap_or(true);
+        current.agent.max_tool_iterations = agent_setup.max_tool_iterations.unwrap_or(20);
+        current.agent.max_history_messages = agent_setup.max_history_messages.unwrap_or(50);
+
+        let agent_name = agent_setup.name.clone();
+        let delegate = current.agents.entry(agent_name.clone()).or_default();
+        if let Some(ws) = agent_setup.workspace_dir {
+            if !ws.trim().is_empty() {
+                delegate.workspace_dir = Some(expand_tilde_path(&ws));
+            } else {
+                delegate.workspace_dir = None;
+            }
+        }
     }
 
     current.multimodal.desktop_vision_enabled = setup.multimodal.desktop_vision_enabled;

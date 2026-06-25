@@ -58,7 +58,13 @@
       "Bash(ssh-keyscan github.com)",
       "Bash(ssh -T git@github.com)",
       "Bash(git rebase *4)",
-      "Bash(GIT_EDITOR=true git rebase *)"
+      "Bash(GIT_EDITOR=true git rebase *)",
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(npm --version)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(cargo build *)",
+      "Bash(start *)"
     ]
   }
 }

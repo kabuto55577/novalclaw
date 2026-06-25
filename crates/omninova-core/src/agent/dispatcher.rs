@@ -1,3 +1,4 @@
+use crate::agent::budget::BudgetTracker;
 use crate::agent::history::sanitize_messages_for_provider;
 use crate::providers::{ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::security::SecurityContext;
@@ -12,6 +13,7 @@ pub struct AgentDispatcher<'a> {
     tool_specs: &'a [ToolSpec],
     max_tool_iterations: usize,
     security: &'a SecurityContext,
+    budget: &'a BudgetTracker,
 }
 
 impl<'a> AgentDispatcher<'a> {
@@ -21,6 +23,7 @@ impl<'a> AgentDispatcher<'a> {
         tool_specs: &'a [ToolSpec],
         max_tool_iterations: usize,
         security: &'a SecurityContext,
+        budget: &'a BudgetTracker,
     ) -> Self {
         Self {
             provider,
@@ -28,6 +31,7 @@ impl<'a> AgentDispatcher<'a> {
             tool_specs,
             max_tool_iterations,
             security,
+            budget,
         }
     }
 
@@ -37,6 +41,24 @@ impl<'a> AgentDispatcher<'a> {
         let iteration_cap = self.max_tool_iterations.max(1);
 
         for iteration in 0..iteration_cap {
+            if let Some(reason) = self.budget.check() {
+                let text = format!(
+                    "[budget exceeded] {reason}. Stopping here ({}).",
+                    self.budget.summary()
+                );
+                self.security
+                    .audit()
+                    .record_event(
+                        "budget_exceeded",
+                        false,
+                        &reason,
+                        serde_json::json!({ "stage": "dispatcher", "iteration": iteration }),
+                    )
+                    .await;
+                messages.push(ChatMessage::assistant(&text));
+                return Ok(text);
+            }
+
             let provider_name = self
                 .security
                 .audit()
@@ -56,6 +78,10 @@ impl<'a> AgentDispatcher<'a> {
                     },
                 })
                 .await;
+
+            if let Ok(response) = &chat_result {
+                self.budget.record_call(response.usage.as_ref());
+            }
 
             match &chat_result {
                 Ok(response) => {

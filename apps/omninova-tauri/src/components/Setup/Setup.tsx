@@ -12,7 +12,6 @@ import { SkillsConfigForm } from "./SkillsConfigForm";
 import { PersonaConfigForm } from "./PersonaConfigForm";
 import { invokeTauri } from "../../utils/tauri";
 import omninovalLogo from "../../assets/omninoval-logo.png";
-import { open } from "@tauri-apps/plugin-dialog";
 
 export interface SetupProps {
   /** 配置完成且网关启动成功后调用，用于进入对话界面 */
@@ -262,22 +261,17 @@ export function Setup({
     }
   };
 
-  const saveSetupConfig = async (): Promise<boolean> => {
-    const result = await invokeTauri<{ gateway_restarted: boolean }>("save_setup_config", { config });
+  const saveSetupConfig = async () => {
+    await invokeTauri("save_setup_config", { config });
     const nextGatewayStatus = await invokeTauri<GatewayStatus>("gateway_status");
     setGatewayStatus(nextGatewayStatus);
-    return result?.gateway_restarted ?? false;
   };
 
   const handleSaveConfig = async () => {
     setBusyAction("save");
     try {
-      const restarted = await saveSetupConfig();
-      if (restarted) {
-        setActionMessage("Workspace 已切换，网关已重启。");
-      } else {
-        setActionMessage("配置已保存。");
-      }
+      await saveSetupConfig();
+      setActionMessage("配置已保存。");
     } catch (error) {
       setActionMessage(
         `保存配置失败：${error instanceof Error ? error.message : String(error)}`
@@ -290,13 +284,10 @@ export function Setup({
   const handleSaveAndStartGateway = async () => {
     setBusyAction("start");
     try {
-      const restarted = await saveSetupConfig();
+      await saveSetupConfig();
       const nextGatewayStatus = await invokeTauri<GatewayStatus>("start_gateway");
       setGatewayStatus(nextGatewayStatus);
-      const msg = restarted
-        ? `Workspace 已切换，网关已重启：${nextGatewayStatus.url}`
-        : `网关已启动：${nextGatewayStatus.url}`;
-      setActionMessage(msg);
+      setActionMessage(`网关已启动：${nextGatewayStatus.url}`);
       if (nextGatewayStatus.running && onConfigSuccess) {
         onConfigSuccess();
       }
@@ -343,29 +334,6 @@ export function Setup({
     }
   };
 
-  const handlePickWorkspaceDir = async () => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "选择 Agent Workspace 目录",
-      });
-      if (selected != null) {
-        setConfig({ ...config, workspace_dir: selected as string });
-        setActionMessage(`已选择 Workspace 目录：${selected}`);
-      }
-    } catch (error) {
-      setActionMessage(
-        `选择目录失败：${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  };
-
-  const handleClearWorkspaceDir = () => {
-    setConfig({ ...config, workspace_dir: undefined });
-    setActionMessage("Workspace 目录已清空，将使用默认目录。");
-  };
-
   const renderTabContent = () => {
     switch (activeTab) {
       case "general":
@@ -376,30 +344,13 @@ export function Setup({
               <div className="setup-grid">
                 <label>
                   Workspace 目录
-                  <div className="setup-input-with-actions">
-                    <input
-                      value={config.workspace_dir ?? ""}
-                      onChange={(event) =>
-                        setConfig({ ...config, workspace_dir: event.target.value })
-                      }
-                      placeholder="/path/to/workspace"
-                    />
-                    <button
-                      type="button"
-                      className="setup-btn setup-btn--secondary"
-                      onClick={() => void handlePickWorkspaceDir()}
-                    >
-                      选择目录
-                    </button>
-                    <button
-                      type="button"
-                      className="setup-btn setup-btn--ghost"
-                      onClick={handleClearWorkspaceDir}
-                      disabled={!config.workspace_dir}
-                    >
-                      清空
-                    </button>
-                  </div>
+                  <input
+                    value={config.workspace_dir ?? ""}
+                    onChange={(event) =>
+                      setConfig({ ...config, workspace_dir: event.target.value })
+                    }
+                    placeholder="/path/to/workspace"
+                  />
                 </label>
                 <label>
                   默认模型服务
